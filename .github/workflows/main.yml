@@ -1,0 +1,23 @@
+name: Build NootedGreen
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Kext
+        run: |
+          xcodebuild -scheme NootedGreen -configuration Release -derivedDataPath build/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NootedGreen-Kext
+          path: build/Build/Products/Release/NootedGreen.kext
