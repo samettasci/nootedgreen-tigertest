@@ -9,8 +9,10 @@ jobs:
     runs-on: macos-15-intel
 
     steps:
-      - name: Checkout fork
+      - name: Checkout fork at Stage12 base commit
         uses: actions/checkout@v4
+        with:
+          ref: 6353f5a9dc3eb63b86e20bdf661f245b9db57cee
 
       - name: Select Xcode 16.4
         run: |
@@ -384,42 +386,37 @@ jobs:
               raise SystemExit("Stage13: could not find IOGraphics branch boundary")
           af = s[start:end]
 
-          def replace_once(h, old, new, label):
-              c = h.count(old)
-              if c != 1:
-                  raise SystemExit(f"Stage13 {label}: expected 1 occurrence, found {c}")
-              return h.replace(old, new, 1)
+          def replace_span(h, begin_marker, end_marker, replacement, label):
+              b = h.find(begin_marker)
+              if b < 0:
+                  raise SystemExit(f"Stage13 {label}: begin marker not found: {begin_marker}")
+              e = h.find(end_marker, b)
+              if e < 0:
+                  raise SystemExit(f"Stage13 {label}: end marker not found: {end_marker}")
+              e += len(end_marker)
+              # Safety: each anchor must be unique in the scoped IOAccelF2 branch.
+              if h.count(begin_marker) != 1 or h.count(end_marker) != 1:
+                  raise SystemExit(
+                      f"Stage13 {label}: non-unique anchors "
+                      f"begin={h.count(begin_marker)} end={h.count(end_marker)}"
+                  )
+              return h[:b] + replacement + h[e:]
 
-          old_entry = "\n".join([
-              'SYSLOG("NGreen", "IOAccelF2: TEXT 0x%llx size 0x%lx", address, size);',
-              '\t\tSYSLOG("ngreen", "ST12-AF00 entered IOAccelF2 processKext");',
-              '\t\tSYSLOG("ngreen", "ST12-AF10 before f2 lookup patch");',
+          # Stage12 output is intentionally the input to Stage13. Replace by
+          # short, stable marker spans instead of one fragile giant exact string.
+          entry_begin = '\t\tSYSLOG("NGreen", "IOAccelF2: TEXT 0x%llx size 0x%lx", address, size);'
+          entry_end = '\t\tSYSLOG("ngreen", "ST12-AF11 f2 lookup patch complete ok=%d", f2ok);'
+          entry_repl = "\n".join([
+              '\t\tSYSLOG("ngreen", "S13:A");',
               '\t\tbool f2ok = p2.apply(patcher, address, size);',
-              '\t\tSYSLOG("NGreen", "IOAccelF2 f2 (fixed): %s", f2ok ? "OK" : "FAILED");',
-              '\t\tSYSLOG("ngreen", "ST12-AF11 f2 lookup patch complete ok=%d", f2ok);',
-          ])
-          new_entry = "\n".join([
-              'SYSLOG("ngreen", "S13:A");',
-              '\t\tbool f2ok = p2.apply(patcher, address, size);',
+              '\t\t(void)f2ok;',
               '\t\tSYSLOG("ngreen", "S13:B");',
           ])
-          af = replace_once(af, old_entry, new_entry, "entry/f2")
+          af = replace_span(af, entry_begin, entry_end, entry_repl, "entry/f2")
 
-          old_v221 = "\n".join([
-              '\t\tSYSLOG("ngreen", "ST12-AF20 before V221 routeAll");',
-              '\t\tRouteRequestPlus wfsRequest[] = {',
-              '\t\t\t{"__ZN20IOAccelEventMachine212waitForStampEj", wrapWaitForStamp, orgWaitForStamp},',
-              '\t\t};',
-              '\t\tbool st12WfsOk = RouteRequestPlus::routeAll(patcher, index, wfsRequest, address, size);',
-              '\t\tSYSLOG("ngreen", "ST12-AF21 V221 routeAll returned=%d", st12WfsOk);',
-              '\t\tif (st12WfsOk) {',
-              '\t\t\tSYSLOG("ngreen", "V221: hooked IOAccelEventMachine2::waitForStamp");',
-              '\t\t} else {',
-              '\t\t\tpatcher.clearError();',
-              '\t\t\tSYSLOG("ngreen", "V221: waitForStamp hook FAILED — symbol not found");',
-              '\t\t}',
-          ])
-          new_v221 = "\n".join([
+          v221_begin = '\t\tSYSLOG("ngreen", "ST12-AF20 before V221 routeAll");'
+          v221_end = '\t\tSYSLOG("ngreen", "V221: waitForStamp hook FAILED — symbol not found");\n\t\t}'
+          v221_repl = "\n".join([
               '\t\tconst bool st13EnableV221 = !checkKernelArgument("-ngreennov221");',
               '\t\tif (st13EnableV221) {',
               '\t\t\tRouteRequestPlus wfsRequest[] = {',
@@ -431,32 +428,11 @@ jobs:
               '\t\t}',
               '\t\tSYSLOG("ngreen", "S13:C");',
           ])
-          af = replace_once(af, old_v221, new_v221, "V221")
+          af = replace_span(af, v221_begin, v221_end, v221_repl, "V221")
 
-          old_v500 = "\n".join([
-              '\t\t// Stage12: on genuine TGL the V500 wrapper does not alter mode bits. Allow',
-              '\t\t// the route to be skipped to test whether this route is the timing-sensitive hang.',
-              '\t\tconst bool st12EnableV500 = !checkKernelArgument("-ngreennov500");',
-              '\t\tSYSLOG("ngreen", "ST12-AF30 V500 enabled=%d", st12EnableV500);',
-              '\t\tif (st12EnableV500) {',
-              '\t\t\tSYSLOG("ngreen", "ST12-AF31 before V500 routeAll");',
-              '\t\t\tRouteRequestPlus simRequest[] = {',
-              '\t\t\t\t{"__ZN20IOAccelLegacySurface11set_id_modeEjj", wrapSetIdMode, orgSetIdMode},',
-              '\t\t\t};',
-              '\t\t\tbool st12V500Ok = RouteRequestPlus::routeAll(patcher, index, simRequest, address, size);',
-              '\t\t\tSYSLOG("ngreen", "ST12-AF32 V500 routeAll returned=%d", st12V500Ok);',
-              '\t\t\tif (st12V500Ok) {',
-              '\t\t\t\tSYSLOG("ngreen", "V500: hooked IOAccelLegacySurface::set_id_mode");',
-              '\t\t\t} else {',
-              '\t\t\t\tpatcher.clearError();',
-              '\t\t\t\tSYSLOG("ngreen", "V500: set_id_mode hook FAILED — symbol not found");',
-              '\t\t\t}',
-              '\t\t} else {',
-              '\t\t\tSYSLOG("ngreen", "ST12-AF33 V500 route skipped by -ngreennov500");',
-              '\t\t}',
-              '\t\tSYSLOG("ngreen", "ST12-AF99 IOAccelF2 processKext complete");',
-          ])
-          new_v500 = "\n".join([
+          v500_begin = '\t\t// Stage12: on genuine TGL the V500 wrapper does not alter mode bits. Allow'
+          v500_end = '\t\tSYSLOG("ngreen", "ST12-AF99 IOAccelF2 processKext complete");'
+          v500_repl = "\n".join([
               '\t\tconst bool st13EnableV500 = !checkKernelArgument("-ngreennov500");',
               '\t\tif (st13EnableV500) {',
               '\t\t\tRouteRequestPlus simRequest[] = {',
@@ -468,7 +444,7 @@ jobs:
               '\t\t}',
               '\t\tSYSLOG("ngreen", "S13:D");',
           ])
-          af = replace_once(af, old_v500, new_v500, "V500")
+          af = replace_span(af, v500_begin, v500_end, v500_repl, "V500")
 
           s = s[:start] + af + s[end:]
           p.write_text(s)
