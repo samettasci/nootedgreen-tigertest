@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL
+name: Build NootedGreen REAL TGL Stage10 Native SKU
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts
+    name: Build x86_64 DEBUG kexts - native SKU test
     runs-on: macos-15-intel
 
     steps:
@@ -22,40 +22,66 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
           FILE="HookCase-master/HookCase/HookCase.cpp"
 
-          echo "Before:"
-          grep -n 'readReg32' "$FILE" | grep -Ei '1638a0|44470' || true
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("HookCase-master/HookCase/HookCase.cpp")
+          s = p.read_text()
+          old = "callback->readReg32(0x1638a0)"
+          new = "callback->readReg32(0x44470)"
+          count = s.count(old)
+          if count != 2:
+              raise SystemExit(f"Expected exactly 2 HookCase 0x1638a0 reads, found {count}")
+          p.write_text(s.replace(old, new))
+          PY
+
+          test "$(grep -c 'callback->readReg32(0x44470)' "$FILE")" -eq 2
+          ! grep -q 'callback->readReg32(0x1638a0)' "$FILE"
+
+      - name: Disable SKU device-ID bypass on genuine Tiger Lake
+        shell: bash
+        run: |
+          set -euxo pipefail
 
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path("HookCase-master/HookCase/HookCase.cpp")
+          p = Path("NootedGreen/kern_gen11.cpp")
           s = p.read_text()
 
-          old = "callback->readReg32(0x1638a0)"
-          new = "callback->readReg32(0x44470)"
+          old = '''\t\t\tLookupPatchPlus const patchesAlways[] = {
+\t\t\t\t// SKU/device-ID bypass — needed for both (0x9A49 not in whitelist)
+\t\t\t\t{activeKext, f3, r3, arrsize(f3),\t1},
+\t\t\t};
+\t\t\tPANIC_COND(!LookupPatchPlus::applyAll(patcher, patchesAlways, address, size), "ngreen",
+\t\t\t\t"kextG11HWT Failed to apply base patches!");
+'''
+
+          new = '''\t\t\tif (!NGreen::callback->isRealTGL) {
+\t\t\t\tLookupPatchPlus const patchesAlways[] = {
+\t\t\t\t\t{activeKext, f3, r3, arrsize(f3),\t1},
+\t\t\t\t};
+\t\t\t\tPANIC_COND(!LookupPatchPlus::applyAll(patcher, patchesAlways, address, size), "ngreen",
+\t\t\t\t\t"kextG11HWT Failed to apply base patches!");
+\t\t\t} else {
+\t\t\t\tSYSLOG("ngreen", "STAGE10: Real TGL — skipping SKU/device-ID bypass; test uses whitelisted 0x9A48");
+\t\t\t}
+'''
 
           count = s.count(old)
           if count != 1:
-              raise SystemExit(
-                  f"Expected exactly one active HookCase 0x1638a0 read, found {count}"
-              )
+              raise SystemExit(f"Expected exactly one patchesAlways SKU block, found {count}")
 
           p.write_text(s.replace(old, new, 1))
           PY
 
-          echo "After:"
-          grep -n 'readReg32' "$FILE" | grep -Ei '1638a0|44470' || true
-
-          grep -q 'callback->readReg32(0x44470)' "$FILE"
+          grep -n 'STAGE10: Real TGL' NootedGreen/kern_gen11.cpp
 
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
           set -euxo pipefail
-
           xcodebuild \
             -project NootedGreen.xcodeproj \
             -scheme NootedGreen \
@@ -71,7 +97,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
           xcodebuild \
             -project HookCase-master/HookCase.xcodeproj \
             -scheme HookCase \
@@ -83,55 +108,34 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
-      - name: Collect and verify artifacts
+      - name: Collect artifacts
         shell: bash
         run: |
           set -euxo pipefail
-
           mkdir -p out/Artifacts
 
-          NG="$(find "$RUNNER_TEMP/DerivedData-NootedGreen" \
-            -type d -name NootedGreen.kext -print -quit)"
-
-          HC="$(find "$RUNNER_TEMP/DerivedData-HookCase" \
-            -type d -name HookCase.kext -print -quit)"
-
-          test -n "$NG"
-          test -n "$HC"
+          NG="$(find "$RUNNER_TEMP/DerivedData-NootedGreen" -type d -name NootedGreen.kext -print -quit)"
+          HC="$(find "$RUNNER_TEMP/DerivedData-HookCase" -type d -name HookCase.kext -print -quit)"
           test -d "$NG"
           test -d "$HC"
 
           ditto "$NG" out/Artifacts/NootedGreen.kext
           ditto "$HC" out/Artifacts/HookCase.kext
 
-          echo "=== Architectures ===" | tee out/Artifacts/BUILD_INFO.txt
-          file out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen \
-            | tee -a out/Artifacts/BUILD_INFO.txt
-          file out/Artifacts/HookCase.kext/Contents/MacOS/HookCase \
-            | tee -a out/Artifacts/BUILD_INFO.txt
-
-          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
-          echo "=== Xcode ===" | tee -a out/Artifacts/BUILD_INFO.txt
-          xcodebuild -version | tee -a out/Artifacts/BUILD_INFO.txt
-
-          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
-          echo "=== Source commit ===" | tee -a out/Artifacts/BUILD_INFO.txt
-          git rev-parse HEAD | tee -a out/Artifacts/BUILD_INFO.txt
-
-          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
-          echo "=== HookCase real-TGL source patch ===" \
-            | tee -a out/Artifacts/BUILD_INFO.txt
-          grep -n 'callback->readReg32(0x44470)' \
-            HookCase-master/HookCase/HookCase.cpp \
-            | tee -a out/Artifacts/BUILD_INFO.txt
-
-          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
-          echo "=== NootedGreen debug markers ===" \
-            | tee -a out/Artifacts/BUILD_INFO.txt
-          strings out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen \
-            | grep -E 'V157|V158|V206|V508|V509|GGTT\[0x40001\]' \
-            | head -n 80 \
-            | tee -a out/Artifacts/BUILD_INFO.txt || true
+          {
+            echo "STAGE10 REAL TGL NATIVE SKU TEST"
+            echo "Expected EFI device-id for this build: 0x9A48"
+            echo "Real TGL skips NootedGreen f3 SKU/device-ID bypass"
+            echo "HookCase register: 0x44470"
+            echo
+            xcodebuild -version
+            echo
+            echo "Source commit:"
+            git rev-parse HEAD
+            echo
+            echo "Source patch marker:"
+            grep -n 'STAGE10: Real TGL' NootedGreen/kern_gen11.cpp
+          } > out/Artifacts/BUILD_INFO.txt
 
           (
             cd out/Artifacts
@@ -141,10 +145,10 @@ jobs:
               > SHA256.txt
           )
 
-      - name: Upload built kexts
+      - name: Upload Stage10 kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-G5GD
+          name: NootedGreen-REAL-TGL-STAGE10-NATIVE-SKU
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
