@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage10 Native SKU
+name: Build NootedGreen REAL TGL Stage11 TCON-OFF
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - native SKU test
+    name: Build x86_64 DEBUG kexts - Stage11 TCON-OFF
     runs-on: macos-15-intel
 
     steps:
@@ -107,6 +107,82 @@ jobs:
           # and it must be inside the !isRealTGL branch we just created.
           test "$(grep -c 'LookupPatchPlus const patchesAlways' NootedGreen/kern_gen11.cpp)" -eq 1
 
+      - name: Stage11 - make TCON path switchable and add checkpoints
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("NootedGreen/kern_gen11.cpp")
+          s = p.read_text()
+
+          # 1) Keep normal -ngreentglwithgfx behaviour by default, but allow this
+          # diagnostic build to skip only the TCON ID patch block.
+          old = 'const bool enableTcon = checkKernelArgument("-ngreentglwithgfx");'
+          new = 'const bool enableTcon = checkKernelArgument("-ngreentglwithgfx") && !checkKernelArgument("-ngreennotcon");'
+          if s.count(old) != 1:
+              raise SystemExit(f"Expected exactly one enableTcon line, found {s.count(old)}")
+          s = s.replace(old, new, 1)
+
+          # 2) Add high-level checkpoints around the exact area where the real
+          # TGL machine has been intermittently freezing.
+          replacements = [
+              (
+                  'SYSLOG("ngreen", "init AppleIntelTGLGraphicsFramebuffer");',
+                  'SYSLOG("ngreen", "init AppleIntelTGLGraphicsFramebuffer");\n'
+                  '\t\t\tSYSLOG("ngreen", "ST11-FB00 entered TGL framebuffer processKext");'
+              ),
+              (
+                  'PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, requests, address, size), "ngreen","Failed to route dp symbols");',
+                  'PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, requests, address, size), "ngreen","Failed to route dp symbols");\n'
+                  '\t\t\tSYSLOG("ngreen", "ST11-FB10 common routes complete");'
+              ),
+              (
+                  'PANIC_COND(!LookupPatchPlus::applyAll(patcher, patches , address, size), "ngreen", "kextG11FBT Failed to apply dbg patches!");',
+                  'SYSLOG("ngreen", "ST11-FB20 before debug lookup patches");\n'
+                  '\t\t\tPANIC_COND(!LookupPatchPlus::applyAll(patcher, patches , address, size), "ngreen", "kextG11FBT Failed to apply dbg patches!");\n'
+                  '\t\t\tSYSLOG("ngreen", "ST11-FB21 debug lookup patches complete");'
+              ),
+              (
+                  'if (enableTcon) {\n\t\t\t\tLookupPatchPlus const tconPatches[] = {',
+                  'SYSLOG("ngreen", "ST11-FB30 TCON enabled=%d", enableTcon);\n'
+                  '\t\t\tif (enableTcon) {\n'
+                  '\t\t\t\tSYSLOG("ngreen", "ST11-FB31 before TCON lookup patches");\n'
+                  '\t\t\t\tLookupPatchPlus const tconPatches[] = {'
+              ),
+              (
+                  'SYSLOG("ngreen", "Path E: TCON ID patches applied (dbg)");',
+                  'SYSLOG("ngreen", "Path E: TCON ID patches applied (dbg)");\n'
+                  '\t\t\t\tSYSLOG("ngreen", "ST11-FB32 TCON lookup patches complete");'
+              ),
+          ]
+
+          for old_text, new_text in replacements:
+              count = s.count(old_text)
+              if count != 1:
+                  raise SystemExit(
+                      f"Stage11 checkpoint safety check failed: expected 1 occurrence, found {count}: {old_text[:80]}"
+                  )
+              s = s.replace(old_text, new_text, 1)
+
+          # Add a final marker before the TGL framebuffer branch returns.
+          marker = '\n\t\t\treturn true;\n\t\t\t\n\t\t}else if (kextG11HW.loadIndex == index) {'
+          replacement = (
+              '\n\t\t\tSYSLOG("ngreen", "ST11-FB99 TGL framebuffer processKext complete");'
+              '\n\t\t\treturn true;\n\t\t\t\n\t\t}else if (kextG11HW.loadIndex == index) {'
+          )
+          if s.count(marker) != 1:
+              raise SystemExit(f"Expected framebuffer return marker once, found {s.count(marker)}")
+          s = s.replace(marker, replacement, 1)
+
+          p.write_text(s)
+          PY
+
+          grep -n 'ST11-FB' NootedGreen/kern_gen11.cpp
+          grep -n 'ngreennotcon' NootedGreen/kern_gen11.cpp
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -141,8 +217,10 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE10 REAL TGL NATIVE SKU TEST"
+            echo "STAGE11 REAL TGL TCON-OFF CHECKPOINT TEST"
             echo "Expected EFI device-id: 0x9A48"
+            echo "Expected boot arg: -ngreennotcon"
+            echo "Framebuffer checkpoint markers: ST11-FB00..FB99"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
             echo
@@ -168,7 +246,7 @@ jobs:
       - name: Upload Stage10 kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE10-NATIVE-SKU
+          name: NootedGreen-REAL-TGL-STAGE11-TCONOFF
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
