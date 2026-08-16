@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage11 TCON-OFF
+name: Build NootedGreen REAL TGL Stage12 IOAccel V500-OFF
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage11 TCON-OFF
+    name: Build x86_64 DEBUG kexts - Stage12 IOAccel V500-OFF
     runs-on: macos-15-intel
 
     steps:
@@ -238,6 +238,131 @@ jobs:
           test "$(grep -c 'ST11-FB99' NootedGreen/kern_gen11.cpp)" -eq 1
           test "$(grep -c 'ngreennotcon' NootedGreen/kern_gen11.cpp)" -eq 1
 
+      - name: Stage12 - IOAccelF2 checkpoints and V500 switch
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          
+          p = Path("NootedGreen/kern_green.cpp")
+          s = p.read_text()
+          
+          branch_begin = 'if (kextIOAcceleratorFamily2.loadIndex == index) {'
+          branch_end = '}  else if (kextIOGraphics.loadIndex == index) {'
+          
+          start = s.find(branch_begin)
+          if start < 0:
+              raise SystemExit("Stage12: could not find IOAcceleratorFamily2 branch start")
+          end = s.find(branch_end, start)
+          if end < 0:
+              raise SystemExit("Stage12: could not find IOGraphics branch boundary")
+          
+          af = s[start:end]
+          
+          def replace_once(haystack, old, new, label):
+              count = haystack.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"Stage12 {label}: expected exactly 1 occurrence inside IOAccelF2 branch, found {count}"
+                  )
+              return haystack.replace(old, new, 1)
+          
+          af = replace_once(
+              af,
+              'SYSLOG("NGreen", "IOAccelF2: TEXT 0x%llx size 0x%lx", address, size);',
+              'SYSLOG("NGreen", "IOAccelF2: TEXT 0x%llx size 0x%lx", address, size);\n'
+              '\t\tSYSLOG("ngreen", "ST12-AF00 entered IOAccelF2 processKext");',
+              "AF00"
+          )
+          
+          af = replace_once(
+              af,
+              '\t\tbool f2ok = p2.apply(patcher, address, size);',
+              '\t\tSYSLOG("ngreen", "ST12-AF10 before f2 lookup patch");\n'
+              '\t\tbool f2ok = p2.apply(patcher, address, size);',
+              "AF10"
+          )
+          
+          af = replace_once(
+              af,
+              'SYSLOG("NGreen", "IOAccelF2 f2 (fixed): %s", f2ok ? "OK" : "FAILED");',
+              'SYSLOG("NGreen", "IOAccelF2 f2 (fixed): %s", f2ok ? "OK" : "FAILED");\n'
+              '\t\tSYSLOG("ngreen", "ST12-AF11 f2 lookup patch complete ok=%d", f2ok);',
+              "AF11"
+          )
+          
+          af = replace_once(
+              af,
+              '\t\tRouteRequestPlus wfsRequest[] = {',
+              '\t\tSYSLOG("ngreen", "ST12-AF20 before V221 routeAll");\n'
+              '\t\tRouteRequestPlus wfsRequest[] = {',
+              "AF20"
+          )
+          
+          old_wfs = """\t\tif (RouteRequestPlus::routeAll(patcher, index, wfsRequest, address, size)) {
+          \t\t\tSYSLOG(\"ngreen\", \"V221: hooked IOAccelEventMachine2::waitForStamp\");
+          \t\t} else {
+          \t\t\tpatcher.clearError();
+          \t\t\tSYSLOG(\"ngreen\", \"V221: waitForStamp hook FAILED — symbol not found\");
+          \t\t}"""
+          new_wfs = """\t\tbool st12WfsOk = RouteRequestPlus::routeAll(patcher, index, wfsRequest, address, size);
+          \t\tSYSLOG(\"ngreen\", \"ST12-AF21 V221 routeAll returned=%d\", st12WfsOk);
+          \t\tif (st12WfsOk) {
+          \t\t\tSYSLOG(\"ngreen\", \"V221: hooked IOAccelEventMachine2::waitForStamp\");
+          \t\t} else {
+          \t\t\tpatcher.clearError();
+          \t\t\tSYSLOG(\"ngreen\", \"V221: waitForStamp hook FAILED — symbol not found\");
+          \t\t}"""
+          af = replace_once(af, old_wfs, new_wfs, "AF21/V221")
+          
+          old_v500 = """\t\t// V500: IOAccelLegacySurface::set_id_mode — diagnostic logger.
+          \t\tRouteRequestPlus simRequest[] = {
+          \t\t\t{\"__ZN20IOAccelLegacySurface11set_id_modeEjj\", wrapSetIdMode, orgSetIdMode},
+          \t\t};
+          \t\tif (RouteRequestPlus::routeAll(patcher, index, simRequest, address, size)) {
+          \t\t\tSYSLOG(\"ngreen\", \"V500: hooked IOAccelLegacySurface::set_id_mode\");
+          \t\t} else {
+          \t\t\tpatcher.clearError();
+          \t\t\tSYSLOG(\"ngreen\", \"V500: set_id_mode hook FAILED — symbol not found\");
+          \t\t}"""
+          new_v500 = """\t\t// Stage12: on genuine TGL the V500 wrapper does not alter mode bits. Allow
+          \t\t// the route to be skipped to test whether this route is the timing-sensitive hang.
+          \t\tconst bool st12EnableV500 = !checkKernelArgument(\"-ngreennov500\");
+          \t\tSYSLOG(\"ngreen\", \"ST12-AF30 V500 enabled=%d\", st12EnableV500);
+          \t\tif (st12EnableV500) {
+          \t\t\tSYSLOG(\"ngreen\", \"ST12-AF31 before V500 routeAll\");
+          \t\t\tRouteRequestPlus simRequest[] = {
+          \t\t\t\t{\"__ZN20IOAccelLegacySurface11set_id_modeEjj\", wrapSetIdMode, orgSetIdMode},
+          \t\t\t};
+          \t\t\tbool st12V500Ok = RouteRequestPlus::routeAll(patcher, index, simRequest, address, size);
+          \t\t\tSYSLOG(\"ngreen\", \"ST12-AF32 V500 routeAll returned=%d\", st12V500Ok);
+          \t\t\tif (st12V500Ok) {
+          \t\t\t\tSYSLOG(\"ngreen\", \"V500: hooked IOAccelLegacySurface::set_id_mode\");
+          \t\t\t} else {
+          \t\t\t\tpatcher.clearError();
+          \t\t\t\tSYSLOG(\"ngreen\", \"V500: set_id_mode hook FAILED — symbol not found\");
+          \t\t\t}
+          \t\t} else {
+          \t\t\tSYSLOG(\"ngreen\", \"ST12-AF33 V500 route skipped by -ngreennov500\");
+          \t\t}
+          \t\tSYSLOG(\"ngreen\", \"ST12-AF99 IOAccelF2 processKext complete\");"""
+          af = replace_once(af, old_v500, new_v500, "AF30-99/V500")
+          
+          s = s[:start] + af + s[end:]
+          p.write_text(s)
+          PY
+
+          echo "=== Stage12 IOAccelF2 source markers ==="
+          grep -n 'ST12-AF' NootedGreen/kern_green.cpp
+          grep -n 'ngreennov500' NootedGreen/kern_green.cpp
+
+          for m in 00 10 11 20 21 30 31 32 33 99; do
+            test "$(grep -c "ST12-AF${m}" NootedGreen/kern_green.cpp)" -eq 1
+          done
+          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 2
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -272,10 +397,11 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE11 REAL TGL TCON-OFF CHECKPOINT TEST"
+            echo "STAGE12 REAL TGL IOACCEL V500-OFF CHECKPOINT TEST"
             echo "Expected EFI device-id: 0x9A48"
-            echo "Expected boot arg: -ngreennotcon"
+            echo "Expected boot args: -ngreennotcon -ngreennov500"
             echo "Framebuffer checkpoint markers: ST11-FB00..FB99"
+            echo "IOAccelF2 checkpoint markers: ST12-AF00..AF99"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
             echo
@@ -301,7 +427,7 @@ jobs:
       - name: Upload Stage10 kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE11-TCONOFF
+          name: NootedGreen-REAL-TGL-STAGE12-V500OFF
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
