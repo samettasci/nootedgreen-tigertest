@@ -1,0 +1,150 @@
+name: Build NootedGreen REAL TGL
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build x86_64 DEBUG kexts
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          xcodebuild -version
+          uname -m
+
+      - name: Patch HookCase for real Tiger Lake
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          FILE="HookCase-master/HookCase/HookCase.cpp"
+
+          echo "Before:"
+          grep -n 'readReg32' "$FILE" | grep -Ei '1638a0|44470' || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("HookCase-master/HookCase/HookCase.cpp")
+          s = p.read_text()
+
+          old = "callback->readReg32(0x1638a0)"
+          new = "callback->readReg32(0x44470)"
+
+          count = s.count(old)
+          if count != 1:
+              raise SystemExit(
+                  f"Expected exactly one active HookCase 0x1638a0 read, found {count}"
+              )
+
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+          echo "After:"
+          grep -n 'readReg32' "$FILE" | grep -Ei '1638a0|44470' || true
+
+          grep -q 'callback->readReg32(0x44470)' "$FILE"
+
+      - name: Build NootedGreen DEBUG
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          xcodebuild \
+            -project NootedGreen.xcodeproj \
+            -scheme NootedGreen \
+            -configuration Debug \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-NootedGreen" \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Build HookCase DEBUG
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          xcodebuild \
+            -project HookCase-master/HookCase.xcodeproj \
+            -scheme HookCase \
+            -configuration Debug \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-HookCase" \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Collect and verify artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p out/Artifacts
+
+          NG="$(find "$RUNNER_TEMP/DerivedData-NootedGreen" \
+            -type d -name NootedGreen.kext -print -quit)"
+
+          HC="$(find "$RUNNER_TEMP/DerivedData-HookCase" \
+            -type d -name HookCase.kext -print -quit)"
+
+          test -n "$NG"
+          test -n "$HC"
+          test -d "$NG"
+          test -d "$HC"
+
+          ditto "$NG" out/Artifacts/NootedGreen.kext
+          ditto "$HC" out/Artifacts/HookCase.kext
+
+          echo "=== Architectures ===" | tee out/Artifacts/BUILD_INFO.txt
+          file out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen \
+            | tee -a out/Artifacts/BUILD_INFO.txt
+          file out/Artifacts/HookCase.kext/Contents/MacOS/HookCase \
+            | tee -a out/Artifacts/BUILD_INFO.txt
+
+          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
+          echo "=== Xcode ===" | tee -a out/Artifacts/BUILD_INFO.txt
+          xcodebuild -version | tee -a out/Artifacts/BUILD_INFO.txt
+
+          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
+          echo "=== Source commit ===" | tee -a out/Artifacts/BUILD_INFO.txt
+          git rev-parse HEAD | tee -a out/Artifacts/BUILD_INFO.txt
+
+          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
+          echo "=== HookCase real-TGL source patch ===" \
+            | tee -a out/Artifacts/BUILD_INFO.txt
+          grep -n 'callback->readReg32(0x44470)' \
+            HookCase-master/HookCase/HookCase.cpp \
+            | tee -a out/Artifacts/BUILD_INFO.txt
+
+          echo "" | tee -a out/Artifacts/BUILD_INFO.txt
+          echo "=== NootedGreen debug markers ===" \
+            | tee -a out/Artifacts/BUILD_INFO.txt
+          strings out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen \
+            | grep -E 'V157|V158|V206|V508|V509|GGTT\[0x40001\]' \
+            | head -n 80 \
+            | tee -a out/Artifacts/BUILD_INFO.txt || true
+
+          (
+            cd out/Artifacts
+            shasum -a 256 \
+              NootedGreen.kext/Contents/MacOS/NootedGreen \
+              HookCase.kext/Contents/MacOS/HookCase \
+              > SHA256.txt
+          )
+
+      - name: Upload built kexts
+        uses: actions/upload-artifact@v4
+        with:
+          name: NootedGreen-REAL-TGL-G5GD
+          path: out/Artifacts
+          if-no-files-found: error
+          retention-days: 14
