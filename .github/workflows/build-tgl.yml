@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage15B HW accelerator skip
+name: Build NootedGreen REAL TGL Stage16 early HW registration skip
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage14 F2 switch
+    name: Build x86_64 DEBUG kexts - Stage16 early NOGFX
     runs-on: macos-15-intel
 
     steps:
@@ -617,6 +617,88 @@ jobs:
           test "$(grep -c 'ngreennogfx' NootedGreen/kern_gen11.cpp)" -eq 2
           test "$(grep -c '}else if (kextG11HW.loadIndex == index) {' NootedGreen/kern_gen11.cpp)" -eq 1
 
+      - name: Stage16 - skip TGL HW registration before processKext
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY16'
+          from pathlib import Path
+
+          p = Path("NootedGreen/kern_gen11.cpp")
+          s = p.read_text()
+
+          init_begin = "void Gen11::init() {"
+          start = s.find(init_begin)
+          if start < 0:
+              raise SystemExit("Stage16: Gen11::init() not found")
+
+          # Limit all edits to Gen11::init() so other withgfx checks remain untouched.
+          next_func_candidates = [
+              s.find("\nvoid Gen11::", start + len(init_begin)),
+              s.find("\nbool Gen11::", start + len(init_begin)),
+              s.find("\nuint32_t Gen11::", start + len(init_begin)),
+          ]
+          next_func_candidates = [x for x in next_func_candidates if x >= 0]
+          if not next_func_candidates:
+              raise SystemExit("Stage16: could not find end of Gen11::init()")
+          end = min(next_func_candidates)
+
+          init = s[start:end]
+
+          callback_line = "\tcallback = this;"
+          if init.count(callback_line) != 1:
+              raise SystemExit(
+                  f"Stage16: expected one 'callback = this;' in Gen11::init, found {init.count(callback_line)}"
+              )
+
+          armed = "\n".join([
+              callback_line,
+              "",
+              '\tconst bool st16NoGfx = NGreen::callback->isRealTGL && checkKernelArgument("-ngreennogfx");',
+              '\tif (st16NoGfx)',
+              '\t\tSYSLOG("ngreen", "ST16:NOGFX-ARMED genuine TGL HW registration isolation active");',
+          ])
+          init = init.replace(callback_line, armed, 1)
+
+          old_hw = "\n".join([
+              '\t\tif (checkKernelArgument("-ngreentglwithgfx")) {',
+              '\t\t\tSYSLOG("ngreen", "Gen11::init: HW tier → TGL (ICL HW skipped)");',
+              '\t\t\tlilu.onKextLoadForce(&kextG11HWT);',
+              '\t\t\tlilu.onKextLoadForce(&kextG11HWTA);',
+              '\t\t}',
+          ])
+
+          if init.count(old_hw) != 1:
+              raise SystemExit(
+                  f"Stage16: expected one withgfx HW registration block, found {init.count(old_hw)}"
+              )
+
+          new_hw = "\n".join([
+              '\t\tif (checkKernelArgument("-ngreentglwithgfx")) {',
+              '\t\t\tif (st16NoGfx) {',
+              '\t\t\t\tSYSLOG("ngreen", "ST16:HW-REG-SKIP genuine TGL HW kext registration skipped");',
+              '\t\t\t} else {',
+              '\t\t\t\tSYSLOG("ngreen", "Gen11::init: HW tier → TGL (ICL HW skipped)");',
+              '\t\t\t\tlilu.onKextLoadForce(&kextG11HWT);',
+              '\t\t\t\tlilu.onKextLoadForce(&kextG11HWTA);',
+              '\t\t\t}',
+              '\t\t}',
+          ])
+          init = init.replace(old_hw, new_hw, 1)
+
+          s = s[:start] + init + s[end:]
+          p.write_text(s)
+          PY16
+
+          echo "=== Stage16 early HW registration isolation ==="
+          grep -n -A 30 -B 3 'ST16:NOGFX-ARMED' NootedGreen/kern_gen11.cpp
+          grep -n -A 8 -B 3 'ST16:HW-REG-SKIP' NootedGreen/kern_gen11.cpp
+
+          test "$(grep -c 'ST16:NOGFX-ARMED' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST16:HW-REG-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'const bool st16NoGfx' NootedGreen/kern_gen11.cpp)" -eq 1
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -651,14 +733,15 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE15B REAL TGL HW/ACCELERATOR ISOLATION TEST"
+            echo "STAGE16 REAL TGL EARLY HW REGISTRATION ISOLATION TEST"
             echo "Expected EFI device-id: 0x9A48"
             echo "Expected EFI framebuffer tier: -ngreentglwithgfx (KEEP NORMAL WITHGFX MODE)"
-            echo "Expected EFI Stage15-B args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx"
-            echo "Stage15-B behavior: genuine TGL kextG11HW branch returns early only when -ngreennogfx is present"
+            echo "Expected EFI Stage16 args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx"
+            echo "Stage16 behavior: -ngreennogfx is armed in Gen11::init and skips onKextLoadForce registration of kextG11HWT/kextG11HWTA before processKext"
+            echo "Early markers: ST16:NOGFX-ARMED and ST16:HW-REG-SKIP"
+            echo "Stage15 processKext safety marker remains: ST15-HW-SKIP (should normally be unnecessary when Stage16 skip works)"
             echo "Framebuffer checkpoint markers: ST11-FB00..FB99"
             echo "IOAccelF2 minimal markers: S14:A S14:B S14:C S14:D"
-            echo "HW skip marker: ST15-HW-SKIP"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
             echo
@@ -681,10 +764,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage15B kexts
+      - name: Upload Stage16 kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE15B-NOGFX
+          name: NootedGreen-REAL-TGL-STAGE16-EARLY-NOGFX
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
