@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage13 IOAccel MINLOG V221-V500 switches
+name: Build NootedGreen REAL TGL Stage14 F2 switch
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage13 IOAccel MINLOG
+    name: Build x86_64 DEBUG kexts - Stage14 F2 switch
     runs-on: macos-15-intel
 
     steps:
@@ -365,7 +365,7 @@ jobs:
           done
           test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 2
 
-      - name: Stage13 - minimal IOAccel logging and V221 switch
+      - name: Stage13 - minimal IOAccel logging and V221 switch (safe line edits)
         shell: bash
         run: |
           set -euxo pipefail
@@ -392,79 +392,92 @@ jobs:
                   raise SystemExit(f"Stage13 {label}: expected 1 occurrence, found {c}")
               return h.replace(old, new, 1)
 
-          # v2 replaced a large span and risked deleting declarations between
-          # the first IOAccel log and f2.apply(). v3 only edits individual lines.
+          # IMPORTANT: do not replace a span around p2. The lookup-patch object is
+          # declared between the Stage12 entry log and f2ok; deleting that span
+          # caused the v2 compile failure. Only edit individual statements here.
+
+          # Keep the original IOAccelF2 TEXT log out of the timing path and turn
+          # Stage12 AF00/AF11 into short Stage13 markers.
           af = replace_once(
               af,
-              '\t\tSYSLOG("NGreen", "IOAccelF2: TEXT 0x%llx size 0x%lx", address, size);\n'
+              'SYSLOG("NGreen", "IOAccelF2: TEXT 0x%llx size 0x%lx", address, size);',
+              '/* Stage13: verbose IOAccelF2 TEXT log removed */',
+              "TEXT log"
+          )
+          af = replace_once(
+              af,
               '\t\tSYSLOG("ngreen", "ST12-AF00 entered IOAccelF2 processKext");',
               '\t\tSYSLOG("ngreen", "S13:A");',
-              "A"
+              "AF00 -> A"
           )
-
           af = replace_once(
               af,
-              '\t\tSYSLOG("ngreen", "ST12-AF10 before f2 lookup patch");',
-              '\t\t/* Stage13 minlog: before f2 patch intentionally quiet */',
-              "remove AF10"
+              'SYSLOG("NGreen", "IOAccelF2 f2 (fixed): %s", f2ok ? "OK" : "FAILED");',
+              '/* Stage13: verbose f2 result log removed */',
+              "f2 result log"
           )
-
           af = replace_once(
               af,
-              '\t\tSYSLOG("NGreen", "IOAccelF2 f2 (fixed): %s", f2ok ? "OK" : "FAILED");\n'
               '\t\tSYSLOG("ngreen", "ST12-AF11 f2 lookup patch complete ok=%d", f2ok);',
               '\t\tSYSLOG("ngreen", "S13:B");',
-              "B"
+              "AF11 -> B"
           )
+
+          # Make V221 switchable without deleting/rebuilding the request block.
+          # This preserves the exact Stage12 code shape that already compiled.
+          old_route = '\t\tbool st12WfsOk = RouteRequestPlus::routeAll(patcher, index, wfsRequest, address, size);'
+          new_route = (
+              '\t\tconst bool st13EnableV221 = !checkKernelArgument("-ngreennov221");\n'
+              '\t\tbool st12WfsOk = true;\n'
+              '\t\tif (st13EnableV221)\n'
+              '\t\t\tst12WfsOk = RouteRequestPlus::routeAll(patcher, index, wfsRequest, address, size);'
+          )
+          af = replace_once(af, old_route, new_route, "V221 route switch")
 
           af = replace_once(
               af,
               '\t\tSYSLOG("ngreen", "ST12-AF20 before V221 routeAll");',
-              '\t\t/* Stage13 minlog: V221 entry intentionally quiet */',
-              "remove AF20"
+              '/* Stage13: AF20 log removed */',
+              "AF20 remove"
+          )
+          af = replace_once(
+              af,
+              '\t\tSYSLOG("ngreen", "ST12-AF21 V221 routeAll returned=%d", st12WfsOk);',
+              '\t\tSYSLOG("ngreen", "S13:C");',
+              "AF21 -> C"
+          )
+          af = replace_once(
+              af,
+              '\t\t\tSYSLOG("ngreen", "V221: hooked IOAccelEventMachine2::waitForStamp");',
+              '\t\t\t/* Stage13: V221 success log removed */',
+              "V221 success log"
+          )
+          af = replace_once(
+              af,
+              '\t\t\tSYSLOG("ngreen", "V221: waitForStamp hook FAILED — symbol not found");',
+              '\t\t\t/* Stage13: V221 failure log removed */',
+              "V221 failure log"
           )
 
-          old_v221 = "\n".join([
-              '\t\tbool st12WfsOk = RouteRequestPlus::routeAll(patcher, index, wfsRequest, address, size);',
-              '\t\tSYSLOG("ngreen", "ST12-AF21 V221 routeAll returned=%d", st12WfsOk);',
-              '\t\tif (st12WfsOk) {',
-              '\t\t\tSYSLOG("ngreen", "V221: hooked IOAccelEventMachine2::waitForStamp");',
-              '\t\t} else {',
-              '\t\t\tpatcher.clearError();',
-              '\t\t\tSYSLOG("ngreen", "V221: waitForStamp hook FAILED — symbol not found");',
-              '\t\t}',
-          ])
-          new_v221 = "\n".join([
-              '\t\tconst bool st13EnableV221 = !checkKernelArgument("-ngreennov221");',
-              '\t\tif (st13EnableV221) {',
-              '\t\t\tif (!RouteRequestPlus::routeAll(patcher, index, wfsRequest, address, size)) {',
-              '\t\t\t\tpatcher.clearError();',
-              '\t\t\t}',
-              '\t\t}',
-              '\t\tSYSLOG("ngreen", "S13:C");',
-          ])
-          af = replace_once(af, old_v221, new_v221, "V221 switch")
-
-          # Keep the Stage12 V500 control structure because that exact shape
-          # already built successfully. Only shorten the logs.
-          replacements = [
-              ('\t\tSYSLOG("ngreen", "ST12-AF30 V500 enabled=%d", st12EnableV500);',
-               '\t\t/* Stage13 minlog: V500 enabled state intentionally quiet */', "AF30"),
-              ('\t\t\tSYSLOG("ngreen", "ST12-AF31 before V500 routeAll");',
-               '\t\t\t/* Stage13 minlog: before V500 route intentionally quiet */', "AF31"),
-              ('\t\t\tSYSLOG("ngreen", "ST12-AF32 V500 routeAll returned=%d", st12V500Ok);',
-               '\t\t\t/* Stage13 minlog: V500 route result intentionally quiet */', "AF32"),
-              ('\t\t\t\tSYSLOG("ngreen", "V500: hooked IOAccelLegacySurface::set_id_mode");',
-               '\t\t\t\t/* Stage13 minlog: V500 route succeeded */', "V500 success log"),
-              ('\t\t\t\tSYSLOG("ngreen", "V500: set_id_mode hook FAILED — symbol not found");',
-               '\t\t\t\t/* Stage13 minlog: V500 route failed */', "V500 fail log"),
-              ('\t\t\tSYSLOG("ngreen", "ST12-AF33 V500 route skipped by -ngreennov500");',
-               '\t\t\t/* Stage13 minlog: V500 skipped */', "AF33"),
-              ('\t\tSYSLOG("ngreen", "ST12-AF99 IOAccelF2 processKext complete");',
-               '\t\tSYSLOG("ngreen", "S13:D");', "D"),
+          # Stage12 already has a working -ngreennov500 switch. Keep its code and
+          # only remove verbose logs, with AF99 becoming the short final marker.
+          removals = [
+              ('\t\tSYSLOG("ngreen", "ST12-AF30 V500 enabled=%d", st12EnableV500);', '/* Stage13: AF30 log removed */', 'AF30'),
+              ('\t\t\tSYSLOG("ngreen", "ST12-AF31 before V500 routeAll");', '\t\t\t/* Stage13: AF31 log removed */', 'AF31'),
+              ('\t\t\tSYSLOG("ngreen", "ST12-AF32 V500 routeAll returned=%d", st12V500Ok);', '\t\t\t/* Stage13: AF32 log removed */', 'AF32'),
+              ('\t\t\t\tSYSLOG("ngreen", "V500: hooked IOAccelLegacySurface::set_id_mode");', '\t\t\t\t/* Stage13: V500 success log removed */', 'V500 success'),
+              ('\t\t\t\tSYSLOG("ngreen", "V500: set_id_mode hook FAILED — symbol not found");', '\t\t\t\t/* Stage13: V500 failure log removed */', 'V500 failure'),
+              ('\t\t\tSYSLOG("ngreen", "ST12-AF33 V500 route skipped by -ngreennov500");', '\t\t\t/* Stage13: AF33 log removed */', 'AF33'),
+              ('\t\tSYSLOG("ngreen", "ST12-AF99 IOAccelF2 processKext complete");', '\t\tSYSLOG("ngreen", "S13:D");', 'AF99 -> D'),
           ]
-          for old, new, label in replacements:
+          for old, new, label in removals:
               af = replace_once(af, old, new, label)
+
+          # Sanity: the original lookup-patch expression must still exist.
+          if 'bool f2ok = p2.apply(patcher, address, size);' not in af:
+              raise SystemExit("Stage13 safety: f2ok/p2.apply line disappeared")
+          if 'p2.apply(patcher, address, size)' not in af:
+              raise SystemExit("Stage13 safety: p2 lookup patch call disappeared")
 
           s = s[:start] + af + s[end:]
           p.write_text(s)
@@ -478,35 +491,95 @@ jobs:
             test "$(grep -c "S13:${m}" NootedGreen/kern_green.cpp)" -eq 1
           done
           test "$(grep -c 'ngreennov221' NootedGreen/kern_green.cpp)" -eq 1
-          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 1
+          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 2
           test "$(grep -c 'ST12-AF' NootedGreen/kern_green.cpp)" -eq 0
+          grep -n 'bool f2ok = p2.apply' NootedGreen/kern_green.cpp
 
-          echo "=== Patched IOAccelF2 excerpt ==="
-          grep -n -B 12 -A 55 'S13:A' NootedGreen/kern_green.cpp | head -n 90
+      - name: Stage14 - make IOAccelF2 lookup patch switchable
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY14'
+          from pathlib import Path
+
+          p = Path("NootedGreen/kern_green.cpp")
+          s = p.read_text()
+
+          branch_begin = 'if (kextIOAcceleratorFamily2.loadIndex == index) {'
+          branch_end = '}  else if (kextIOGraphics.loadIndex == index) {'
+          start = s.find(branch_begin)
+          if start < 0:
+              raise SystemExit("Stage14: could not find IOAcceleratorFamily2 branch start")
+          end = s.find(branch_end, start)
+          if end < 0:
+              raise SystemExit("Stage14: could not find IOGraphics branch boundary")
+          af = s[start:end]
+
+          def replace_once(h, old, new, label):
+              c = h.count(old)
+              if c != 1:
+                  raise SystemExit(f"Stage14 {label}: expected 1 occurrence, found {c}")
+              return h.replace(old, new, 1)
+
+          af = replace_once(
+              af,
+              '\t\tSYSLOG("ngreen", "S13:A");',
+              '\t\tSYSLOG("ngreen", "S14:A");',
+              "A marker"
+          )
+
+          old_f2 = '\t\tbool f2ok = p2.apply(patcher, address, size);'
+          new_f2 = "\n".join([
+              '\t\tconst bool st14EnableF2 = !checkKernelArgument("-ngreennof2");',
+              '\t\tbool f2ok = true;',
+              '\t\tif (st14EnableF2)',
+              '\t\t\tf2ok = p2.apply(patcher, address, size);',
+          ])
+          af = replace_once(af, old_f2, new_f2, "F2 switch")
+
+          af = replace_once(
+              af,
+              '\t\tSYSLOG("ngreen", "S13:B");',
+              '\t\tSYSLOG("ngreen", "S14:B");',
+              "B marker"
+          )
+          af = replace_once(
+              af,
+              '\t\tSYSLOG("ngreen", "S13:C");',
+              '\t\tSYSLOG("ngreen", "S14:C");',
+              "C marker"
+          )
+          af = replace_once(
+              af,
+              '\t\tSYSLOG("ngreen", "S13:D");',
+              '\t\tSYSLOG("ngreen", "S14:D");',
+              "D marker"
+          )
+
+          s = s[:start] + af + s[end:]
+          p.write_text(s)
+          PY14
+
+          echo "=== Stage14 IOAccelF2 source ==="
+          grep -n 'S14:' NootedGreen/kern_green.cpp
+          grep -n 'ngreennof2\|ngreennov221\|ngreennov500' NootedGreen/kern_green.cpp
+
+          for m in A B C D; do
+            test "$(grep -c "S14:${m}" NootedGreen/kern_green.cpp)" -eq 1
+          done
+          test "$(grep -c 'S13:' NootedGreen/kern_green.cpp)" -eq 0
+          test "$(grep -c 'ngreennof2' NootedGreen/kern_green.cpp)" -eq 1
+          test "$(grep -c 'ngreennov221' NootedGreen/kern_green.cpp)" -eq 1
+          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 2
+          grep -n 'st14EnableF2\|p2.apply' NootedGreen/kern_green.cpp
 
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
-          set -uo pipefail
-          LOG="$RUNNER_TEMP/nootedgreen-build.log"
-          set +e
-          xcodebuild \
-            -project NootedGreen.xcodeproj \
-            -scheme NootedGreen \
-            -configuration Debug \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData-NootedGreen" \
-            ARCHS=x86_64 \
-            ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            build 2>&1 | tee "$LOG"
-          status=${PIPESTATUS[0]}
-          set -e
-          if [ "$status" -ne 0 ]; then
-            echo "=== COMPILER ERRORS (focused) ==="
-            grep -n -C 4 -E '(^|[[:space:]])error:|fatal error:' "$LOG" | tail -n 160 || true
-            exit "$status"
-          fi
+          set -euxo pipefail
+
+          xcodebuild             -project NootedGreen.xcodeproj             -scheme NootedGreen             -configuration Debug             -derivedDataPath "$RUNNER_TEMP/DerivedData-NootedGreen"             ARCHS=x86_64             ONLY_ACTIVE_ARCH=NO             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             build
 
       - name: Build HookCase DEBUG
         shell: bash
@@ -535,12 +608,12 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE13 REAL TGL IOACCEL MINLOG V221/V500 SWITCH TEST"
+            echo "STAGE14 REAL TGL IOACCEL F2/V221/V500 SWITCH TEST"
             echo "Expected EFI device-id: 0x9A48"
-            echo "Expected EFI A args: -ngreennotcon -ngreennov500"
-            echo "Expected EFI B args: -ngreennotcon -ngreennov500 -ngreennov221"
+            echo "Expected EFI control B args: -ngreennotcon -ngreennov500 -ngreennov221"
+            echo "Expected EFI Stage14-C args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2"
             echo "Framebuffer checkpoint markers: ST11-FB00..FB99"
-            echo "IOAccelF2 minimal markers: S13:A S13:B S13:C S13:D"
+            echo "IOAccelF2 minimal markers: S14:A S14:B S14:C S14:D"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
             echo
@@ -563,10 +636,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage13 kexts
+      - name: Upload Stage14 kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE13-MINLOG
+          name: NootedGreen-REAL-TGL-STAGE14-F2SWITCH
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
