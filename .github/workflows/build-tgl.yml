@@ -1,4 +1,4 @@
-name: Build NootedGreen REAL TGL Stage14 F2 switch v3
+name: Build NootedGreen REAL TGL Stage15B HW accelerator skip
 
 on:
   workflow_dispatch:
@@ -580,6 +580,43 @@ jobs:
           test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 1
           grep -n 'st14EnableF2\|p2.apply' NootedGreen/kern_green.cpp
 
+      - name: Stage15B - make genuine TGL HW accelerator branch skippable
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY15'
+          from pathlib import Path
+
+          p = Path("NootedGreen/kern_gen11.cpp")
+          s = p.read_text()
+
+          old = '}else if (kextG11HW.loadIndex == index) {'
+          new = "\n".join([
+              '}else if (kextG11HW.loadIndex == index) {',
+              '\t\tif (NGreen::callback->isRealTGL && checkKernelArgument("-ngreennogfx")) {',
+              '\t\t\tSYSLOG("ngreen", "ST15-HW-SKIP genuine TGL HW/accelerator branch disabled by -ngreennogfx");',
+              '\t\t\treturn true;',
+              '\t\t}',
+          ])
+
+          count = s.count(old)
+          if count != 1:
+              raise SystemExit(
+                  f"Stage15B: expected exactly one kextG11HW branch opener, found {count}"
+              )
+
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY15
+
+          echo "=== Stage15B genuine-TGL HW skip source ==="
+          grep -n -A 8 -B 3 'ST15-HW-SKIP' NootedGreen/kern_gen11.cpp
+
+          test "$(grep -c 'ST15-HW-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ngreennogfx' NootedGreen/kern_gen11.cpp)" -eq 2
+          test "$(grep -c '}else if (kextG11HW.loadIndex == index) {' NootedGreen/kern_gen11.cpp)" -eq 1
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -614,12 +651,14 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE14 REAL TGL IOACCEL F2/V221/V500 SWITCH TEST"
+            echo "STAGE15B REAL TGL HW/ACCELERATOR ISOLATION TEST"
             echo "Expected EFI device-id: 0x9A48"
-            echo "Expected EFI control B args: -ngreennotcon -ngreennov500 -ngreennov221"
-            echo "Expected EFI Stage14-C args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2"
+            echo "Expected EFI framebuffer tier: -ngreentglwithgfx (KEEP NORMAL WITHGFX MODE)"
+            echo "Expected EFI Stage15-B args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx"
+            echo "Stage15-B behavior: genuine TGL kextG11HW branch returns early only when -ngreennogfx is present"
             echo "Framebuffer checkpoint markers: ST11-FB00..FB99"
             echo "IOAccelF2 minimal markers: S14:A S14:B S14:C S14:D"
+            echo "HW skip marker: ST15-HW-SKIP"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
             echo
@@ -642,10 +681,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage14 kexts
+      - name: Upload Stage15B kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE14-F2SWITCH
+          name: NootedGreen-REAL-TGL-STAGE15B-NOGFX
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
