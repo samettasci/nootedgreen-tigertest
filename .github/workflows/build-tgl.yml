@@ -1,4 +1,4 @@
-name: Build NootedGreen REAL TGL Stage14 F2 switch v2
+name: Build NootedGreen REAL TGL Stage14 F2 switch v3
 
 on:
   workflow_dispatch:
@@ -409,6 +409,12 @@ jobs:
               '\t\tSYSLOG("ngreen", "ST12-AF00 entered IOAccelF2 processKext");',
               '\t\tSYSLOG("ngreen", "S13:A");',
               "AF00 -> A"
+          )
+          af = replace_once(
+              af,
+              '\t\tSYSLOG("ngreen", "ST12-AF10 before f2 lookup patch");',
+              '\t\t/* Stage13 minlog: before f2 patch intentionally quiet */',
+              "AF10 remove"
           )
           af = replace_once(
               af,
