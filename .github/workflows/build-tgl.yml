@@ -1,4 +1,4 @@
-name: Build NootedGreen REAL TGL Stage14 F2 switch
+name: Build NootedGreen REAL TGL Stage14 F2 switch v2
 
 on:
   workflow_dispatch:
@@ -491,7 +491,7 @@ jobs:
             test "$(grep -c "S13:${m}" NootedGreen/kern_green.cpp)" -eq 1
           done
           test "$(grep -c 'ngreennov221' NootedGreen/kern_green.cpp)" -eq 1
-          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 2
+          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 1
           test "$(grep -c 'ST12-AF' NootedGreen/kern_green.cpp)" -eq 0
           grep -n 'bool f2ok = p2.apply' NootedGreen/kern_green.cpp
 
@@ -571,7 +571,7 @@ jobs:
           test "$(grep -c 'S13:' NootedGreen/kern_green.cpp)" -eq 0
           test "$(grep -c 'ngreennof2' NootedGreen/kern_green.cpp)" -eq 1
           test "$(grep -c 'ngreennov221' NootedGreen/kern_green.cpp)" -eq 1
-          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 2
+          test "$(grep -c 'ngreennov500' NootedGreen/kern_green.cpp)" -eq 1
           grep -n 'st14EnableF2\|p2.apply' NootedGreen/kern_green.cpp
 
       - name: Build NootedGreen DEBUG
