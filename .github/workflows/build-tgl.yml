@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage16 early HW registration skip
+name: Build NootedGreen REAL TGL Stage17 force FB with HW off
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage16 early NOGFX
+    name: Build x86_64 DEBUG kexts - Stage17 FORCE-FB HW-OFF
     runs-on: macos-15-intel
 
     steps:
@@ -699,6 +699,127 @@ jobs:
           test "$(grep -c 'ST16:HW-REG-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
           test "$(grep -c 'const bool st16NoGfx' NootedGreen/kern_gen11.cpp)" -eq 1
 
+      - name: Stage17 - force TGL framebuffer registration while HW stays off
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY17'
+          from pathlib import Path
+          import re
+
+          p = Path("NootedGreen/kern_gen11.cpp")
+          s = p.read_text()
+
+          init_begin = "void Gen11::init() {"
+          start = s.find(init_begin)
+          if start < 0:
+              raise SystemExit("Stage17: Gen11::init() not found")
+
+          next_func_candidates = [
+              s.find("\nvoid Gen11::", start + len(init_begin)),
+              s.find("\nbool Gen11::", start + len(init_begin)),
+              s.find("\nuint32_t Gen11::", start + len(init_begin)),
+          ]
+          next_func_candidates = [x for x in next_func_candidates if x >= 0]
+          if not next_func_candidates:
+              raise SystemExit("Stage17: could not find end of Gen11::init()")
+          end = min(next_func_candidates)
+
+          init = s[start:end]
+
+          # Discover the TGL framebuffer KextInfo registrations from the actual pinned
+          # source instead of hard-coding a second guessed symbol list.
+          fb_pat = re.compile(
+              r'(?m)^(?P<indent>[ \t]*)'
+              r'lilu\.onKextLoadForce\(&(?P<sym>kextG11FB[A-Za-z0-9_]*)\);\s*$'
+          )
+          matches = list(fb_pat.finditer(init))
+          syms = []
+          for m in matches:
+              sym = m.group("sym")
+              if sym not in syms:
+                  syms.append(sym)
+
+          if not syms:
+              print("=== Gen11::init() for debugging ===")
+              print(init)
+              raise SystemExit(
+                  "Stage17: no kextG11FB* onKextLoadForce registrations found in Gen11::init()"
+              )
+          if len(syms) > 4:
+              raise SystemExit(f"Stage17: unexpected framebuffer registration symbols: {syms}")
+
+          print("Stage17 framebuffer registration symbols:", ", ".join(syms))
+
+          # Guard the original registration call(s).  With -ngreenforcefb they will
+          # be registered once by the explicit Stage17 block; without the arg the
+          # original source behaviour is preserved.
+          def guard_original(m):
+              indent = m.group("indent")
+              sym = m.group("sym")
+              return (
+                  f'{indent}if (!st17ForceFb)\n'
+                  f'{indent}\tlilu.onKextLoadForce(&{sym});'
+              )
+
+          init = fb_pat.sub(guard_original, init)
+
+          stage16_anchor = "\n".join([
+              '\tconst bool st16NoGfx = NGreen::callback->isRealTGL && checkKernelArgument("-ngreennogfx");',
+              '\tif (st16NoGfx)',
+              '\t\tSYSLOG("ngreen", "ST16:NOGFX-ARMED genuine TGL HW registration isolation active");',
+          ])
+          if init.count(stage16_anchor) != 1:
+              raise SystemExit(
+                  f"Stage17: expected Stage16 state anchor once, found {init.count(stage16_anchor)}"
+              )
+
+          force_lines = [
+              stage16_anchor,
+              "",
+              '\tconst bool st17ForceFb = st16NoGfx &&',
+              '\t\tcheckKernelArgument("-ngreenforcefb") &&',
+              '\t\tcheckKernelArgument("-ngreentglwithgfx");',
+              '\tif (st17ForceFb) {',
+              '\t\tSYSLOG("ngreen", "ST17:FB-FORCE-ARMED TGL framebuffer registration forced; HW remains disabled");',
+          ]
+          for sym in syms:
+              force_lines.append(f'\t\tlilu.onKextLoadForce(&{sym});')
+          force_lines.append('\t}')
+          init = init.replace(stage16_anchor, "\n".join(force_lines), 1)
+
+          # Add a second marker exactly where Stage16 proves the TGL HW registration
+          # calls are being skipped.
+          hw_marker = (
+              '\t\t\t\tSYSLOG("ngreen", '
+              '"ST16:HW-REG-SKIP genuine TGL HW kext registration skipped");'
+          )
+          if init.count(hw_marker) != 1:
+              raise SystemExit(
+                  f"Stage17: expected Stage16 HW skip marker once, found {init.count(hw_marker)}"
+              )
+          init = init.replace(
+              hw_marker,
+              hw_marker + '\n'
+              '\t\t\t\tSYSLOG("ngreen", "ST17:HW-REG-OFF confirmed while framebuffer force mode is active");',
+              1
+          )
+
+          s = s[:start] + init + s[end:]
+          p.write_text(s)
+          PY17
+
+          echo "=== Stage17 forced-FB / HW-off source ==="
+          grep -n -A 20 -B 4 'ST17:FB-FORCE-ARMED' NootedGreen/kern_gen11.cpp
+          grep -n -A 6 -B 4 'ST17:HW-REG-OFF' NootedGreen/kern_gen11.cpp
+          grep -n 'kextG11FB.*onKextLoadForce\|onKextLoadForce.*kextG11FB' NootedGreen/kern_gen11.cpp || true
+
+          test "$(grep -c 'ST17:FB-FORCE-ARMED' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST17:HW-REG-OFF' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'const bool st17ForceFb' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ngreenforcefb' NootedGreen/kern_gen11.cpp)" -eq 1
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -733,13 +854,13 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE16 REAL TGL EARLY HW REGISTRATION ISOLATION TEST"
+            echo "STAGE17 REAL TGL FORCED FRAMEBUFFER / HW-OFF ISOLATION TEST"
             echo "Expected EFI device-id: 0x9A48"
             echo "Expected EFI framebuffer tier: -ngreentglwithgfx (KEEP NORMAL WITHGFX MODE)"
-            echo "Expected EFI Stage16 args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx"
-            echo "Stage16 behavior: -ngreennogfx is armed in Gen11::init and skips onKextLoadForce registration of kextG11HWT/kextG11HWTA before processKext"
-            echo "Early markers: ST16:NOGFX-ARMED and ST16:HW-REG-SKIP"
-            echo "Stage15 processKext safety marker remains: ST15-HW-SKIP (should normally be unnecessary when Stage16 skip works)"
+            echo "Expected EFI Stage17 args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx -ngreenforcefb"
+            echo "Stage17 behavior: force-register actual kextG11FB* KextInfo objects discovered from pinned Gen11::init while Stage16 keeps kextG11HWT/kextG11HWTA registration disabled"
+            echo "Stage17 markers: ST17:FB-FORCE-ARMED and ST17:HW-REG-OFF"
+            echo "Stage16 markers retained: ST16:NOGFX-ARMED and ST16:HW-REG-SKIP"
             echo "Framebuffer checkpoint markers: ST11-FB00..FB99"
             echo "IOAccelF2 minimal markers: S14:A S14:B S14:C S14:D"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
@@ -764,10 +885,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage16 kexts
+      - name: Upload Stage17 kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE16-EARLY-NOGFX
+          name: NootedGreen-REAL-TGL-STAGE17-FORCE-FB-HWOFF
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
