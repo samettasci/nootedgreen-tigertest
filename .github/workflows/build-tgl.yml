@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage17 force FB with HW off
+name: Build NootedGreen REAL TGL Stage18B framebuffer-only debug skip
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage17 FORCE-FB HW-OFF
+    name: Build x86_64 DEBUG kexts - Stage18B FB-ONLY DBG-SKIP
     runs-on: macos-15-intel
 
     steps:
@@ -699,126 +699,93 @@ jobs:
           test "$(grep -c 'ST16:HW-REG-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
           test "$(grep -c 'const bool st16NoGfx' NootedGreen/kern_gen11.cpp)" -eq 1
 
-      - name: Stage17 - force TGL framebuffer registration while HW stays off
+      - name: Stage18B - keep common routes and skip only TGL FB debug lookup apply
         shell: bash
         run: |
           set -euxo pipefail
 
-          python3 - <<'PY17'
+          python3 - <<'PY18B'
           from pathlib import Path
-          import re
 
           p = Path("NootedGreen/kern_gen11.cpp")
           s = p.read_text()
 
-          init_begin = "void Gen11::init() {"
-          start = s.find(init_begin)
+          fb_begin = 'SYSLOG("ngreen", "init AppleIntelTGLGraphicsFramebuffer");'
+          fb_end = '}else if (kextG11HW.loadIndex == index) {'
+          start = s.find(fb_begin)
           if start < 0:
-              raise SystemExit("Stage17: Gen11::init() not found")
+              raise SystemExit("Stage18B: TGL framebuffer branch start not found")
+          end = s.find(fb_end, start)
+          if end < 0:
+              raise SystemExit("Stage18B: TGL HW branch boundary not found")
 
-          next_func_candidates = [
-              s.find("\nvoid Gen11::", start + len(init_begin)),
-              s.find("\nbool Gen11::", start + len(init_begin)),
-              s.find("\nuint32_t Gen11::", start + len(init_begin)),
-          ]
-          next_func_candidates = [x for x in next_func_candidates if x >= 0]
-          if not next_func_candidates:
-              raise SystemExit("Stage17: could not find end of Gen11::init()")
-          end = min(next_func_candidates)
-
-          init = s[start:end]
-
-          # Discover the TGL framebuffer KextInfo registrations from the actual pinned
-          # source instead of hard-coding a second guessed symbol list.
-          fb_pat = re.compile(
-              r'(?m)^(?P<indent>[ \t]*)'
-              r'lilu\.onKextLoadForce\(&(?P<sym>kextG11FB[A-Za-z0-9_]*)\);\s*$'
+          fb = s[start:end]
+          dbg_apply = (
+              'PANIC_COND(!LookupPatchPlus::applyAll(patcher, patches , address, size), '
+              '"ngreen", "kextG11FBT Failed to apply dbg patches!");'
           )
-          matches = list(fb_pat.finditer(init))
-          syms = []
-          for m in matches:
-              sym = m.group("sym")
-              if sym not in syms:
-                  syms.append(sym)
-
-          if not syms:
-              print("=== Gen11::init() for debugging ===")
-              print(init)
-              raise SystemExit(
-                  "Stage17: no kextG11FB* onKextLoadForce registrations found in Gen11::init()"
-              )
-          if len(syms) > 4:
-              raise SystemExit(f"Stage17: unexpected framebuffer registration symbols: {syms}")
-
-          print("Stage17 framebuffer registration symbols:", ", ".join(syms))
-
-          # Guard the original registration call(s).  With -ngreenforcefb they will
-          # be registered once by the explicit Stage17 block; without the arg the
-          # original source behaviour is preserved.
-          def guard_original(m):
-              indent = m.group("indent")
-              sym = m.group("sym")
-              return (
-                  f'{indent}if (!st17ForceFb)\n'
-                  f'{indent}\tlilu.onKextLoadForce(&{sym});'
-              )
-
-          init = fb_pat.sub(guard_original, init)
-
-          stage16_anchor = "\n".join([
-              '\tconst bool st16NoGfx = NGreen::callback->isRealTGL && checkKernelArgument("-ngreennogfx");',
-              '\tif (st16NoGfx)',
-              '\t\tSYSLOG("ngreen", "ST16:NOGFX-ARMED genuine TGL HW registration isolation active");',
+          old = "\n".join([
+              '\t\t\tSYSLOG("ngreen", "ST11-FB20 before debug lookup patches");',
+              '\t\t\t' + dbg_apply,
+              '\t\t\tSYSLOG("ngreen", "ST11-FB21 debug lookup patches complete");',
           ])
-          if init.count(stage16_anchor) != 1:
-              raise SystemExit(
-                  f"Stage17: expected Stage16 state anchor once, found {init.count(stage16_anchor)}"
-              )
+          new = "\n".join([
+              '\t\t\tSYSLOG("ngreen", "ST11-FB20 before debug lookup patches");',
+              '\t\t\tSYSLOG("ngreen", "ST18:FB-DBG-SKIP debug lookup patches deliberately skipped");',
+              '\t\t\tSYSLOG("ngreen", "ST18:FB-DBG-POST continuing after debug lookup skip");',
+          ])
 
-          force_lines = [
-              stage16_anchor,
-              "",
-              '\tconst bool st17ForceFb = st16NoGfx &&',
-              '\t\tcheckKernelArgument("-ngreenforcefb") &&',
-              '\t\tcheckKernelArgument("-ngreentglwithgfx");',
-              '\tif (st17ForceFb) {',
-              '\t\tSYSLOG("ngreen", "ST17:FB-FORCE-ARMED TGL framebuffer registration forced; HW remains disabled");',
+          count = fb.count(old)
+          if count != 1:
+              raise SystemExit(
+                  f"Stage18B: expected exactly one marked debug apply block, found {count}"
+              )
+          fb = fb.replace(old, new, 1)
+
+          # The common RouteRequestPlus path must remain intact.  Only the marked
+          # debug LookupPatchPlus::applyAll block is removed from this FB branch.
+          common_route = (
+              'PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, requests, '
+              'address, size), "ngreen","Failed to route dp symbols");'
+          )
+          if fb.count(common_route) != 1:
+              raise SystemExit(
+                  f"Stage18B: common framebuffer route count changed: {fb.count(common_route)}"
+              )
+          if dbg_apply in fb:
+              raise SystemExit("Stage18B: debug LookupPatchPlus apply still exists in FB branch")
+          if fb.count('ST18:FB-DBG-SKIP') != 1 or fb.count('ST18:FB-DBG-POST') != 1:
+              raise SystemExit("Stage18B: skip/post marker count is not exactly one")
+          if 'ST11-FB21' in fb:
+              raise SystemExit("Stage18B: FB21 must not claim a skipped apply completed")
+
+          order = [
+              'ST11-FB00',
+              'ST11-FB10',
+              'ST11-FB20',
+              'ST18:FB-DBG-SKIP',
+              'ST18:FB-DBG-POST',
+              'ST11-FB99',
           ]
-          for sym in syms:
-              force_lines.append(f'\t\tlilu.onKextLoadForce(&{sym});')
-          force_lines.append('\t}')
-          init = init.replace(stage16_anchor, "\n".join(force_lines), 1)
-
-          # Add a second marker exactly where Stage16 proves the TGL HW registration
-          # calls are being skipped.
-          hw_marker = (
-              '\t\t\t\tSYSLOG("ngreen", '
-              '"ST16:HW-REG-SKIP genuine TGL HW kext registration skipped");'
-          )
-          if init.count(hw_marker) != 1:
+          positions = [fb.find(marker) for marker in order]
+          if any(pos < 0 for pos in positions) or positions != sorted(positions):
               raise SystemExit(
-                  f"Stage17: expected Stage16 HW skip marker once, found {init.count(hw_marker)}"
+                  f"Stage18B: required framebuffer marker order failed: {list(zip(order, positions))}"
               )
-          init = init.replace(
-              hw_marker,
-              hw_marker + '\n'
-              '\t\t\t\tSYSLOG("ngreen", "ST17:HW-REG-OFF confirmed while framebuffer force mode is active");',
-              1
-          )
 
-          s = s[:start] + init + s[end:]
+          s = s[:start] + fb + s[end:]
           p.write_text(s)
-          PY17
+          PY18B
 
-          echo "=== Stage17 forced-FB / HW-off source ==="
-          grep -n -A 20 -B 4 'ST17:FB-FORCE-ARMED' NootedGreen/kern_gen11.cpp
-          grep -n -A 6 -B 4 'ST17:HW-REG-OFF' NootedGreen/kern_gen11.cpp
-          grep -n 'kextG11FB.*onKextLoadForce\|onKextLoadForce.*kextG11FB' NootedGreen/kern_gen11.cpp || true
+          echo "=== Stage18B framebuffer-only debug-skip source ==="
+          grep -n -A 8 -B 5 'ST18:FB-DBG-SKIP' NootedGreen/kern_gen11.cpp
+          grep -n 'ST11-FB00\|ST11-FB10\|ST11-FB20\|ST18:FB-DBG\|ST11-FB99' NootedGreen/kern_gen11.cpp
 
-          test "$(grep -c 'ST17:FB-FORCE-ARMED' NootedGreen/kern_gen11.cpp)" -eq 1
-          test "$(grep -c 'ST17:HW-REG-OFF' NootedGreen/kern_gen11.cpp)" -eq 1
-          test "$(grep -c 'const bool st17ForceFb' NootedGreen/kern_gen11.cpp)" -eq 1
-          test "$(grep -c 'ngreenforcefb' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18:FB-DBG-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18:FB-DBG-POST' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST11-FB21' NootedGreen/kern_gen11.cpp)" -eq 0
+          test "$(grep -c 'ST17:' NootedGreen/kern_gen11.cpp)" -eq 0
+          test "$(grep -c 'ngreenforcefb' NootedGreen/kern_gen11.cpp)" -eq 0
 
       - name: Build NootedGreen DEBUG
         shell: bash
@@ -854,14 +821,15 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE17 REAL TGL FORCED FRAMEBUFFER / HW-OFF ISOLATION TEST"
+            echo "STAGE18B REAL TGL FRAMEBUFFER-ONLY / DEBUG-LOOKUP-SKIP TEST"
             echo "Expected EFI device-id: 0x9A48"
             echo "Expected EFI framebuffer tier: -ngreentglwithgfx (KEEP NORMAL WITHGFX MODE)"
-            echo "Expected EFI Stage17 args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx -ngreenforcefb"
-            echo "Stage17 behavior: force-register actual kextG11FB* KextInfo objects discovered from pinned Gen11::init while Stage16 keeps kextG11HWT/kextG11HWTA registration disabled"
-            echo "Stage17 markers: ST17:FB-FORCE-ARMED and ST17:HW-REG-OFF"
+            echo "Expected EFI Stage18B args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx (NO -ngreenforcefb)"
+            echo "Required system state: AppleIntelTGLGraphicsFramebuffer IOPCIPrimaryMatch=0x9A488086; AppleIntelTGLGraphics IOPCIPrimaryMatch=0xFFFF8086 dummy nonmatch"
+            echo "Stage18B behavior: common framebuffer routes remain ON; only the marked debug LookupPatchPlus::applyAll block is skipped"
+            echo "Stage18B markers: ST18:FB-DBG-SKIP and ST18:FB-DBG-POST"
             echo "Stage16 markers retained: ST16:NOGFX-ARMED and ST16:HW-REG-SKIP"
-            echo "Framebuffer checkpoint markers: ST11-FB00..FB99"
+            echo "Framebuffer marker path: ST11-FB00 -> ST11-FB10 -> ST11-FB20 -> ST18:FB-DBG-SKIP -> ST18:FB-DBG-POST -> ST11-FB99"
             echo "IOAccelF2 minimal markers: S14:A S14:B S14:C S14:D"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
@@ -885,10 +853,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage17 kexts
+      - name: Upload Stage18B kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE17-FORCE-FB-HWOFF
+          name: NootedGreen-REAL-TGL-STAGE18B-FBONLY-DBGSKIP
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
