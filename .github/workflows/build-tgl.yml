@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage18C framebuffer patchless isolation
+name: Build NootedGreen REAL TGL Stage18D PowerWell minimal restore
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage18C FB PATCHLESS
+    name: Build x86_64 DEBUG kexts - Stage18D POWERWELL MINIMAL
     runs-on: macos-15-intel
 
     steps:
@@ -902,6 +902,234 @@ jobs:
           test "$(grep -c 'ST18:FB-DBG-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
           test "$(grep -c 'ngreenforcefb' NootedGreen/kern_gen11.cpp)" -eq 0
 
+      - name: Stage18D - restore only PowerWell routes and add first-call runtime markers
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY18D'
+          from pathlib import Path
+
+          p = Path("NootedGreen/kern_gen11.cpp")
+          s = p.read_text()
+
+          fb_begin = 'SYSLOG("ngreen", "init AppleIntelTGLGraphicsFramebuffer");'
+          fb_end = '}else if (kextG11HW.loadIndex == index) {'
+          start = s.find(fb_begin)
+          if start < 0:
+              raise SystemExit("Stage18D: TGL framebuffer branch start not found")
+          end = s.find(fb_end, start)
+          if end < 0:
+              raise SystemExit("Stage18D: TGL HW branch boundary not found")
+          fb = s[start:end]
+
+          def replace_once(h, old, new, label):
+              count = h.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"Stage18D {label}: expected exactly one target, found {count}"
+                  )
+              return h.replace(old, new, 1)
+
+          # Stage18C remains the baseline: its three full framebuffer route groups stay
+          # compile-disabled. Install a new, independent route set containing ONLY the
+          # three PowerWell state wrappers required to stamp +0x78/fMMIO before callthrough.
+          common_anchor = '\t\tSYSLOG("ngreen", "ST18C:FB-COMMON-ROUTES-SKIP");'
+          common_insert = "\n".join([
+              common_anchor,
+              '\t\tRouteRequestPlus st18dPwCommonRequests[] = {',
+              '\t\t\t{"__ZN19AppleIntelPowerWell21hwSetPowerWellStatePGEbj", hwSetPowerWellStatePGE, this->ohwSetPowerWellStatePGE},',
+              '\t\t\t{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateAuxEbj", hwSetPowerWellStateAux, this->ohwSetPowerWellStateAux},',
+              '\t\t\t{"__ZN19AppleIntelPowerWell22hwSetPowerWellStateDDIEbj", hwSetPowerWellStateDDI, this->ohwSetPowerWellStateDDI},',
+              '\t\t};',
+              '\t\tSYSLOG("ngreen", "ST18D:PW-ROUTE-COMMON-BEFORE");',
+              '\t\tPANIC_COND(!RouteRequestPlus::routeAll(patcher, index, st18dPwCommonRequests, address, size), "ngreen","Stage18D failed to route PowerWell state symbols");',
+              '\t\tSYSLOG("ngreen", "ST18D:PW-ROUTE-COMMON-AFTER");',
+          ])
+          fb = replace_once(fb, common_anchor, common_insert, "common PowerWell route insertion")
+
+          # Production and debug TGL binaries use different PowerWell::init signatures.
+          # Re-enable only that one semantic hook in each branch; all other prod/debug
+          # RouteRequestPlus entries remain behind Stage18C's false guard.
+          prod_anchor = '\t\t\tSYSLOG("ngreen", "ST18C:FB-PROD-ROUTES-SKIP");'
+          prod_insert = "\n".join([
+              prod_anchor,
+              '\t\t\tRouteRequestPlus st18dPwProdInitRequest[] = {',
+              '\t\t\t\t{"__ZN19AppleIntelPowerWell4initEP31AppleIntelFramebufferController", AppleIntelPowerWellinit, this->oAppleIntelPowerWellinit},',
+              '\t\t\t};',
+              '\t\t\tSYSLOG("ngreen", "ST18D:PW-ROUTE-INIT-PROD-BEFORE");',
+              '\t\t\tPANIC_COND(!RouteRequestPlus::routeAll(patcher, index, st18dPwProdInitRequest, address, size), "ngreen","Stage18D failed to route production PowerWell::init");',
+              '\t\t\tSYSLOG("ngreen", "ST18D:PW-ROUTE-INIT-PROD-AFTER");',
+          ])
+          fb = replace_once(fb, prod_anchor, prod_insert, "production PowerWell init insertion")
+
+          dbg_anchor = '\t\t\tSYSLOG("ngreen", "ST18C:FB-DEBUG-ROUTES-SKIP");'
+          dbg_insert = "\n".join([
+              dbg_anchor,
+              '\t\t\tRouteRequestPlus st18dPwDebugInitRequest[] = {',
+              '\t\t\t\t{"__ZN19AppleIntelPowerWell4initEP24AppleIntelBaseController", AppleIntelPowerWellinit, this->oAppleIntelPowerWellinit},',
+              '\t\t\t};',
+              '\t\t\tSYSLOG("ngreen", "ST18D:PW-ROUTE-INIT-DEBUG-BEFORE");',
+              '\t\t\tPANIC_COND(!RouteRequestPlus::routeAll(patcher, index, st18dPwDebugInitRequest, address, size), "ngreen","Stage18D failed to route debug PowerWell::init");',
+              '\t\t\tSYSLOG("ngreen", "ST18D:PW-ROUTE-INIT-DEBUG-AFTER");',
+          ])
+          fb = replace_once(fb, dbg_anchor, dbg_insert, "debug PowerWell init insertion")
+
+          s = s[:start] + fb + s[end:]
+
+          # Runtime markers around PowerWell::init.  PW01 occurs after ccont capture but
+          # before Apple's original init.  If the old __cxa_pure_virtual recurs, these
+          # markers tell us whether it happened before or during the original callthrough.
+          old_init = "\n".join([
+              'void Gen11::AppleIntelPowerWellinit(AppleIntel::AppleIntelPowerWell *that, AppleIntel::AppleIntelBaseController *param_1)',
+              '{',
+              '\tccont = param_1->fRegCachePool;',
+              '',
+              '\tFunctionCast(AppleIntelPowerWellinit, callback->oAppleIntelPowerWellinit)(that, param_1);',
+          ])
+          new_init = "\n".join([
+              'void Gen11::AppleIntelPowerWellinit(AppleIntel::AppleIntelPowerWell *that, AppleIntel::AppleIntelBaseController *param_1)',
+              '{',
+              '\tSYSLOG("ngreen", "ST18D:PW00 init ENTER controller=%p powerwell=%p", param_1, that);',
+              '\tccont = param_1->fRegCachePool;',
+              '\tSYSLOG("ngreen", "ST18D:PW01 ccont captured=%p", ccont);',
+              '',
+              '\tFunctionCast(AppleIntelPowerWellinit, callback->oAppleIntelPowerWellinit)(that, param_1);',
+              '\tSYSLOG("ngreen", "ST18D:PW02 original init RETURN");',
+          ])
+          if s.count(old_init) != 1:
+              raise SystemExit(f"Stage18D PowerWell::init body target count={s.count(old_init)}")
+          s = s.replace(old_init, new_init, 1)
+
+          # First-call-only markers in the three state wrappers.  Keep semantics identical:
+          # real TGL still stamps +0x78 with ccont and calls Apple's original implementation.
+          old_pge = "\n".join([
+              '\t// Real TGL: use original with ccont fixup.',
+              '\tgetMember<void *>(that, 0x78) = ccont;',
+              '\tFunctionCast(hwSetPowerWellStatePGE, callback->ohwSetPowerWellStatePGE)(that, param_1, param_2);',
+          ])
+          new_pge = "\n".join([
+              '\t// Real TGL: use original with ccont fixup.',
+              '\tstatic bool st18dPgeLogged = false;',
+              '\tconst bool st18dPgeFirst = !st18dPgeLogged;',
+              '\tif (st18dPgeFirst) {',
+              '\t\tst18dPgeLogged = true;',
+              '\t\tSYSLOG("ngreen", "ST18D:PGE ENTER ccont=%p en=%u mask=0x%x", ccont, (unsigned)param_1, param_2);',
+              '\t}',
+              '\tgetMember<void *>(that, 0x78) = ccont;',
+              '\tFunctionCast(hwSetPowerWellStatePGE, callback->ohwSetPowerWellStatePGE)(that, param_1, param_2);',
+              '\tif (st18dPgeFirst)',
+              '\t\tSYSLOG("ngreen", "ST18D:PGE RETURN");',
+          ])
+          if s.count(old_pge) != 1:
+              raise SystemExit(f"Stage18D PGE wrapper target count={s.count(old_pge)}")
+          s = s.replace(old_pge, new_pge, 1)
+
+          old_aux = "\n".join([
+              'void Gen11::hwSetPowerWellStateAux(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)',
+              '{',
+              '\tgetMember<void *>(that, 0x78) = ccont;',
+              '\tFunctionCast(hwSetPowerWellStateAux, callback->ohwSetPowerWellStateAux)(that,param_1,param_2);',
+              '}',
+          ])
+          new_aux = "\n".join([
+              'void Gen11::hwSetPowerWellStateAux(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)',
+              '{',
+              '\tstatic bool st18dAuxLogged = false;',
+              '\tconst bool st18dAuxFirst = !st18dAuxLogged;',
+              '\tif (st18dAuxFirst) {',
+              '\t\tst18dAuxLogged = true;',
+              '\t\tSYSLOG("ngreen", "ST18D:AUX ENTER ccont=%p en=%u mask=0x%x", ccont, (unsigned)param_1, param_2);',
+              '\t}',
+              '\tgetMember<void *>(that, 0x78) = ccont;',
+              '\tFunctionCast(hwSetPowerWellStateAux, callback->ohwSetPowerWellStateAux)(that,param_1,param_2);',
+              '\tif (st18dAuxFirst)',
+              '\t\tSYSLOG("ngreen", "ST18D:AUX RETURN");',
+              '}',
+          ])
+          if s.count(old_aux) != 1:
+              raise SystemExit(f"Stage18D AUX wrapper target count={s.count(old_aux)}")
+          s = s.replace(old_aux, new_aux, 1)
+
+          old_ddi = "\n".join([
+              'void Gen11::hwSetPowerWellStateDDI(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)',
+              '{',
+              '\tgetMember<void *>(that, 0x78) = ccont;',
+              '\tFunctionCast(hwSetPowerWellStateDDI, callback->ohwSetPowerWellStateDDI)(that,param_1,param_2);',
+              '}',
+          ])
+          new_ddi = "\n".join([
+              'void Gen11::hwSetPowerWellStateDDI(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)',
+              '{',
+              '\tstatic bool st18dDdiLogged = false;',
+              '\tconst bool st18dDdiFirst = !st18dDdiLogged;',
+              '\tif (st18dDdiFirst) {',
+              '\t\tst18dDdiLogged = true;',
+              '\t\tSYSLOG("ngreen", "ST18D:DDI ENTER ccont=%p en=%u mask=0x%x", ccont, (unsigned)param_1, param_2);',
+              '\t}',
+              '\tgetMember<void *>(that, 0x78) = ccont;',
+              '\tFunctionCast(hwSetPowerWellStateDDI, callback->ohwSetPowerWellStateDDI)(that,param_1,param_2);',
+              '\tif (st18dDdiFirst)',
+              '\t\tSYSLOG("ngreen", "ST18D:DDI RETURN");',
+              '}',
+          ])
+          if s.count(old_ddi) != 1:
+              raise SystemExit(f"Stage18D DDI wrapper target count={s.count(old_ddi)}")
+          s = s.replace(old_ddi, new_ddi, 1)
+
+          # Safety: Stage18C's broad route groups must still be off, and Stage18D must
+          # install exactly 3 common PowerWell state routes + exactly one init route in
+          # each binary variant.  The old powerwell f1/f1p JZ->JMP bytes remain declared
+          # but are NOT added to any active LookupPatchPlus list by this stage.
+          checks = {
+              'ST18D:PW-ROUTE-COMMON-BEFORE': 1,
+              'ST18D:PW-ROUTE-COMMON-AFTER': 1,
+              'ST18D:PW-ROUTE-INIT-PROD-BEFORE': 1,
+              'ST18D:PW-ROUTE-INIT-PROD-AFTER': 1,
+              'ST18D:PW-ROUTE-INIT-DEBUG-BEFORE': 1,
+              'ST18D:PW-ROUTE-INIT-DEBUG-AFTER': 1,
+              'ST18D:PW00': 1,
+              'ST18D:PW01': 1,
+              'ST18D:PW02': 1,
+              'ST18D:PGE ENTER': 1,
+              'ST18D:PGE RETURN': 1,
+              'ST18D:AUX ENTER': 1,
+              'ST18D:AUX RETURN': 1,
+              'ST18D:DDI ENTER': 1,
+              'ST18D:DDI RETURN': 1,
+          }
+          for token, expected in checks.items():
+              count = s.count(token)
+              if count != expected:
+                  raise SystemExit(f"Stage18D safety: {token!r} count={count}, expected={expected}")
+
+          if s.count('const bool st18cEnableFBRoutes = false;') != 1:
+              raise SystemExit("Stage18D safety: Stage18C broad-route false guard changed")
+          if s.count('if (st18cEnableFBRoutes) {') != 3:
+              raise SystemExit("Stage18D safety: Stage18C three broad route guards changed")
+          if 'ST11-FB10' in fb or 'ST11-FB21' in fb:
+              raise SystemExit("Stage18D safety: stale Stage11 completion marker resurrected")
+
+          p.write_text(s)
+          PY18D
+
+          echo "=== Stage18D PowerWell minimal route source ==="
+          grep -n -A 12 -B 4 'ST18D:PW-ROUTE' NootedGreen/kern_gen11.cpp
+          echo "=== Stage18D PowerWell runtime markers ==="
+          grep -n 'ST18D:PW0\|ST18D:PGE\|ST18D:AUX\|ST18D:DDI' NootedGreen/kern_gen11.cpp
+
+          test "$(grep -c 'const bool st18cEnableFBRoutes = false' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'if (st18cEnableFBRoutes)' NootedGreen/kern_gen11.cpp)" -eq 3
+          test "$(grep -c 'ST18D:PW-ROUTE-COMMON-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:PW-ROUTE-INIT-PROD-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:PW-ROUTE-INIT-DEBUG-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:PW00' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:PW01' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:PW02' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:PGE ENTER' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:AUX ENTER' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18D:DDI ENTER' NootedGreen/kern_gen11.cpp)" -eq 1
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -936,16 +1164,16 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE18C REAL TGL FRAMEBUFFER PATCHLESS ISOLATION TEST"
+            echo "STAGE18D REAL TGL POWERWELL MINIMAL RESTORE TEST"
             echo "Expected EFI device-id: 0x9A48"
             echo "Expected EFI framebuffer tier: -ngreentglwithgfx (KEEP NORMAL WITHGFX MODE)"
-            echo "Expected EFI Stage18C args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx (NO -ngreenforcefb)"
+            echo "Expected EFI Stage18D args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx (NO -ngreenforcefb)"
             echo "Required system state: AppleIntelTGLGraphicsFramebuffer IOPCIPrimaryMatch=0x9A488086; AppleIntelTGLGraphics IOPCIPrimaryMatch=0xFFFF8086 dummy nonmatch"
-            echo "Stage18C behavior: all three TGL framebuffer RouteRequestPlus groups are compile-disabled; the marked debug LookupPatchPlus::applyAll block remains skipped"
-            echo "Stage18C markers: ST18C:FB-COMMON-ROUTES-SKIP plus exactly one of ST18C:FB-PROD-ROUTES-SKIP / ST18C:FB-DEBUG-ROUTES-SKIP"
+            echo "Stage18D behavior: Stage18C broad FB route groups remain disabled; only PowerWell::init plus PGE/AUX/DDI state routes are restored; debug LookupPatchPlus apply remains skipped"
+            echo "Stage18D route markers: ST18D:PW-ROUTE-COMMON-{BEFORE|AFTER} plus exactly one init variant {PROD|DEBUG}-{BEFORE|AFTER}"
             echo "Stage18B debug-lookup-skip markers retained: ST18:FB-DBG-SKIP and ST18:FB-DBG-POST"
             echo "Stage16 markers retained: ST16:NOGFX-ARMED and ST16:HW-REG-SKIP"
-            echo "Framebuffer marker path: ST11-FB00 -> ST18C:FB-COMMON-ROUTES-SKIP -> ST18C:FB-{PROD|DEBUG}-ROUTES-SKIP -> ST11-FB20 -> ST18:FB-DBG-SKIP -> ST18:FB-DBG-POST -> ST11-FB99"
+            echo "PowerWell runtime markers: ST18D:PW00 -> ST18D:PW01 -> optional first-call PGE/AUX/DDI ENTER/RETURN -> ST18D:PW02 if original init returns"
             echo "IOAccelF2 minimal markers retained: S14:A S14:B S14:C S14:D (last visible marker is non-diagnostic; judge only boot outcome)"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
@@ -969,10 +1197,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage18C kexts
+      - name: Upload Stage18D kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE18C-FB-PATCHLESS
+          name: NootedGreen-REAL-TGL-STAGE18D-POWERWELL-MINIMAL
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
