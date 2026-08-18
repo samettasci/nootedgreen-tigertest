@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage18B framebuffer-only debug skip
+name: Build NootedGreen REAL TGL Stage18C framebuffer patchless isolation
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage18B FB-ONLY DBG-SKIP
+    name: Build x86_64 DEBUG kexts - Stage18C FB PATCHLESS
     runs-on: macos-15-intel
 
     steps:
@@ -787,6 +787,121 @@ jobs:
           test "$(grep -c 'ST17:' NootedGreen/kern_gen11.cpp)" -eq 0
           test "$(grep -c 'ngreenforcefb' NootedGreen/kern_gen11.cpp)" -eq 0
 
+      - name: Stage18C - compile-disable every TGL framebuffer route group
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY18C'
+          from pathlib import Path
+
+          p = Path("NootedGreen/kern_gen11.cpp")
+          s = p.read_text()
+
+          fb_begin = 'SYSLOG("ngreen", "init AppleIntelTGLGraphicsFramebuffer");'
+          fb_end = '}else if (kextG11HW.loadIndex == index) {'
+          start = s.find(fb_begin)
+          if start < 0:
+              raise SystemExit("Stage18C: TGL framebuffer branch start not found")
+          end = s.find(fb_end, start)
+          if end < 0:
+              raise SystemExit("Stage18C: TGL HW branch boundary not found")
+
+          fb = s[start:end]
+
+          def replace_once(h, old, new, label):
+              count = h.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"Stage18C {label}: expected exactly one target, found {count}"
+                  )
+              return h.replace(old, new, 1)
+
+          common_call = (
+              'PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, requests, '
+              'address, size), "ngreen","Failed to route dp symbols");'
+          )
+          common_old = "\n".join([
+              '\t\t' + common_call,
+              '\t\tSYSLOG("ngreen", "ST11-FB10 common routes complete");',
+          ])
+          common_new = "\n".join([
+              '\t\tconst bool st18cEnableFBRoutes = false;',
+              '\t\tif (st18cEnableFBRoutes) {',
+              '\t\t\t' + common_call,
+              '\t\t}',
+              '\t\tSYSLOG("ngreen", "ST18C:FB-COMMON-ROUTES-SKIP");',
+          ])
+          fb = replace_once(fb, common_old, common_new, "common route group")
+
+          prod_call = (
+              'PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, requests, '
+              'address, size), "ngreen","Failed to route p symbols");'
+          )
+          prod_new = "\n".join([
+              '\t\t\tif (st18cEnableFBRoutes) {',
+              '\t\t\t\t' + prod_call,
+              '\t\t\t}',
+              '\t\t\tSYSLOG("ngreen", "ST18C:FB-PROD-ROUTES-SKIP");',
+          ])
+          fb = replace_once(
+              fb, '\t\t\t' + prod_call, prod_new, "production route group"
+          )
+
+          debug_call = (
+              'PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, requests, '
+              'address, size), "ngreen","Failed to route d symbols");'
+          )
+          debug_new = "\n".join([
+              '\t\t\tif (st18cEnableFBRoutes) {',
+              '\t\t\t\t' + debug_call,
+              '\t\t\t}',
+              '\t\t\tSYSLOG("ngreen", "ST18C:FB-DEBUG-ROUTES-SKIP");',
+          ])
+          fb = replace_once(
+              fb, '\t\t\t' + debug_call, debug_new, "debug route group"
+          )
+
+          # Stage18B already disabled the exact debug LookupPatchPlus apply block.
+          # Keep that isolation and prove that the old success marker is not present.
+          required = [
+              'ST18C:FB-COMMON-ROUTES-SKIP',
+              'ST18C:FB-PROD-ROUTES-SKIP',
+              'ST18C:FB-DEBUG-ROUTES-SKIP',
+              'ST18:FB-DBG-SKIP',
+              'ST18:FB-DBG-POST',
+              'ST11-FB99',
+          ]
+          for marker in required:
+              if fb.count(marker) != 1:
+                  raise SystemExit(
+                      f"Stage18C: marker {marker!r} count is {fb.count(marker)}, expected 1"
+                  )
+
+          if fb.count('if (st18cEnableFBRoutes) {') != 3:
+              raise SystemExit("Stage18C: not all three route groups are guarded")
+          if 'ST11-FB10' in fb:
+              raise SystemExit("Stage18C: stale common-routes-complete marker remains")
+          if 'ST11-FB21' in fb:
+              raise SystemExit("Stage18C: stale debug-lookup-complete marker remains")
+
+          s = s[:start] + fb + s[end:]
+          p.write_text(s)
+          PY18C
+
+          echo "=== Stage18C framebuffer route-free source ==="
+          grep -n -A 6 -B 3 'ST18C:FB-' NootedGreen/kern_gen11.cpp
+
+          test "$(grep -c 'const bool st18cEnableFBRoutes = false' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'if (st18cEnableFBRoutes)' NootedGreen/kern_gen11.cpp)" -eq 3
+          test "$(grep -c 'ST18C:FB-COMMON-ROUTES-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18C:FB-PROD-ROUTES-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18C:FB-DEBUG-ROUTES-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST11-FB10' NootedGreen/kern_gen11.cpp)" -eq 0
+          test "$(grep -c 'ST11-FB21' NootedGreen/kern_gen11.cpp)" -eq 0
+          test "$(grep -c 'ST18:FB-DBG-SKIP' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ngreenforcefb' NootedGreen/kern_gen11.cpp)" -eq 0
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -821,16 +936,17 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE18B REAL TGL FRAMEBUFFER-ONLY / DEBUG-LOOKUP-SKIP TEST"
+            echo "STAGE18C REAL TGL FRAMEBUFFER PATCHLESS ISOLATION TEST"
             echo "Expected EFI device-id: 0x9A48"
             echo "Expected EFI framebuffer tier: -ngreentglwithgfx (KEEP NORMAL WITHGFX MODE)"
-            echo "Expected EFI Stage18B args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx (NO -ngreenforcefb)"
+            echo "Expected EFI Stage18C args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx (NO -ngreenforcefb)"
             echo "Required system state: AppleIntelTGLGraphicsFramebuffer IOPCIPrimaryMatch=0x9A488086; AppleIntelTGLGraphics IOPCIPrimaryMatch=0xFFFF8086 dummy nonmatch"
-            echo "Stage18B behavior: common framebuffer routes remain ON; only the marked debug LookupPatchPlus::applyAll block is skipped"
-            echo "Stage18B markers: ST18:FB-DBG-SKIP and ST18:FB-DBG-POST"
+            echo "Stage18C behavior: all three TGL framebuffer RouteRequestPlus groups are compile-disabled; the marked debug LookupPatchPlus::applyAll block remains skipped"
+            echo "Stage18C markers: ST18C:FB-COMMON-ROUTES-SKIP plus exactly one of ST18C:FB-PROD-ROUTES-SKIP / ST18C:FB-DEBUG-ROUTES-SKIP"
+            echo "Stage18B debug-lookup-skip markers retained: ST18:FB-DBG-SKIP and ST18:FB-DBG-POST"
             echo "Stage16 markers retained: ST16:NOGFX-ARMED and ST16:HW-REG-SKIP"
-            echo "Framebuffer marker path: ST11-FB00 -> ST11-FB10 -> ST11-FB20 -> ST18:FB-DBG-SKIP -> ST18:FB-DBG-POST -> ST11-FB99"
-            echo "IOAccelF2 minimal markers: S14:A S14:B S14:C S14:D"
+            echo "Framebuffer marker path: ST11-FB00 -> ST18C:FB-COMMON-ROUTES-SKIP -> ST18C:FB-{PROD|DEBUG}-ROUTES-SKIP -> ST11-FB20 -> ST18:FB-DBG-SKIP -> ST18:FB-DBG-POST -> ST11-FB99"
+            echo "IOAccelF2 minimal markers retained: S14:A S14:B S14:C S14:D (last visible marker is non-diagnostic; judge only boot outcome)"
             echo "Real TGL skips NootedGreen SKU/device-ID bypass"
             echo "HookCase register: 0x44470"
             echo
@@ -853,10 +969,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage18B kexts
+      - name: Upload Stage18C kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE18B-FBONLY-DBGSKIP
+          name: NootedGreen-REAL-TGL-STAGE18C-FB-PATCHLESS
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
