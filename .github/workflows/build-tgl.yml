@@ -1093,9 +1093,13 @@ jobs:
             file out/Artifacts/HookCase.kext/Contents/MacOS/HookCase
           } > out/Artifacts/BUILD_INFO.txt
 
-          strings out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen | grep -Fq 'ST18E:PMODE-PROD-BEFORE'
-          strings out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen | grep -Fq 'ST18E:PMODE-DEBUG-BEFORE'
-          if strings out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen | grep -Fq 'ST18D:'; then
+          # Avoid `strings | grep -q` under pipefail: grep exits as soon as it
+          # finds a marker, which can make Xcode's strings report a broken pipe.
+          NG_STRINGS="$RUNNER_TEMP/Stage18E-NootedGreen.strings.txt"
+          strings out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen > "$NG_STRINGS"
+          grep -Fq 'ST18E:PMODE-PROD-BEFORE' "$NG_STRINGS"
+          grep -Fq 'ST18E:PMODE-DEBUG-BEFORE' "$NG_STRINGS"
+          if grep -Fq 'ST18D:' "$NG_STRINGS"; then
             echo "ERROR: Stage18D route marker leaked into Stage18E"
             exit 1
           fi
