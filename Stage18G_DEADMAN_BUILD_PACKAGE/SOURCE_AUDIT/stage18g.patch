@@ -1,0 +1,151 @@
+--- NootedGreen/kern_gen11.cpp
++++ NootedGreen/kern_gen11.cpp
+@@ -59,6 +59,52 @@
+ 
+ Gen11 *Gen11::callback = nullptr;
+ 
++
++// Stage18G: diagnostic-only framebuffer start deadman.
++//
++// This wrapper is deliberately pass-through: it does not touch MMIO, change a
++// return value, or enable any of the Stage18C broad framebuffer routes. It only
++// records the latest Stage18D PowerWell phase and deliberately panics if
++// AppleIntel{Base,Framebuffer}Controller::start() does not return in 30 seconds.
++static mach_vm_address_t st18gOriginalFBStart = 0;
++static volatile bool st18gFBStartActive = false;
++static volatile uint32_t st18gPhase = 0;
++static const char * volatile st18gPhaseName = "NOT_STARTED";
++
++static void st18gSetPhase(uint32_t phase, const char *name) {
++	st18gPhase = phase;
++	st18gPhaseName = name;
++}
++
++static void st18gFBStartDeadman(thread_call_param_t, thread_call_param_t) {
++	if (st18gFBStartActive) {
++		panic("ST18G DEADMAN: FBController::start did not return within 30s; "
++		      "last phase=%u (%s). This panic is deliberate diagnostic evidence.",
++		      st18gPhase, st18gPhaseName ? st18gPhaseName : "<null>");
++	}
++	SYSLOG("ngreen", "ST18G:DEADMAN-DISARMED start returned before timeout");
++}
++
++static bool st18gFBStartProbe(void *that, IOService *provider) {
++	st18gFBStartActive = true;
++	st18gSetPhase(100, "FB_START_ENTER");
++
++	auto deadman = thread_call_allocate(st18gFBStartDeadman, nullptr);
++	if (!deadman)
++		panic("ST18G DEADMAN: thread_call_allocate failed");
++
++	uint64_t deadline = 0;
++	clock_interval_to_deadline(30, kSecondScale, &deadline);
++	thread_call_enter_delayed(deadman, deadline);
++	SYSLOG("ngreen", "ST18G:DEADMAN-ARMED timeout=30s");
++
++	const bool result = FunctionCast(st18gFBStartProbe, st18gOriginalFBStart)(that, provider);
++	st18gSetPhase(199, "FB_START_RETURN");
++	st18gFBStartActive = false;
++	SYSLOG("ngreen", "ST18G:FBSTART-RETURN result=%d", result);
++	return result;
++}
++
+ void Gen11::init() {
+ 	callback = this;
+ 
+@@ -652,6 +698,27 @@
+ 			
+ 		}
+ 		
++
++		// Stage18G: route only controller start to a diagnostic pass-through.
++		// Stage18C broad framebuffer route groups remain disabled.
++		if (isprod) {
++			RouteRequestPlus st18gFBStartProdRequest[] = {
++				{"__ZN31AppleIntelFramebufferController5startEP9IOService", st18gFBStartProbe, st18gOriginalFBStart},
++			};
++			SYSLOG("ngreen", "ST18G:FBSTART-ROUTE-PROD-BEFORE");
++			PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, st18gFBStartProdRequest, address, size),
++				"ngreen", "Stage18G failed to route production FBController::start");
++			SYSLOG("ngreen", "ST18G:FBSTART-ROUTE-PROD-AFTER");
++		} else {
++			RouteRequestPlus st18gFBStartDebugRequest[] = {
++				{"__ZN24AppleIntelBaseController5startEP9IOService", st18gFBStartProbe, st18gOriginalFBStart},
++			};
++			SYSLOG("ngreen", "ST18G:FBSTART-ROUTE-DEBUG-BEFORE");
++			PANIC_COND(!RouteRequestPlus::routeAll(patcher, index, st18gFBStartDebugRequest, address, size),
++				"ngreen", "Stage18G failed to route debug FBController::start");
++			SYSLOG("ngreen", "ST18G:FBSTART-ROUTE-DEBUG-AFTER");
++		}
++
+ 		// Stage18F: combine Stage18D's minimal ccont/PowerWell routes
+ 		// with Stage18E's exact probePortMode Type2 call-site bypass.
+ 		// The Stage18C broad framebuffer route guards remain false.
+@@ -2621,6 +2688,7 @@
+ // → vsync interrupts never delivered → GPU ring idle → framebuffer stayed black.
+ void Gen11::hwSetPowerWellStatePGE(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)
+ {
++	st18gSetPhase(220, "PGE_ENTER");
+ 	if (!NGreen::callback->isRealTGL) {
+ 		uint32_t ctl1 = NGreen::callback->readReg32(0x45400);
+ 		uint32_t newVal;
+@@ -2634,6 +2702,7 @@
+ 		SYSLOG("ngreen", "V183.PGE: en=%u mask=0x%x ctl1: 0x%x->0x%x",
+ 			   (unsigned)param_1, param_2, ctl1, newVal);
+ 		NGreen::callback->writeReg32(0x45400, newVal);
++		st18gSetPhase(221, "PGE_RETURN");
+ 		return;
+ 	}
+ 	// Real TGL: use original with ccont fixup.
+@@ -2645,12 +2714,14 @@
+ 	}
+ 	getMember<void *>(that, 0x78) = ccont;
+ 	FunctionCast(hwSetPowerWellStatePGE, callback->ohwSetPowerWellStatePGE)(that, param_1, param_2);
++	st18gSetPhase(221, "PGE_RETURN");
+ 	if (st18dPgeFirst)
+ 		SYSLOG("ngreen", "ST18D:PGE RETURN");
+ }
+ 
+ void Gen11::hwSetPowerWellStateAux(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)
+ {
++	st18gSetPhase(230, "AUX_ENTER");
+ 	static bool st18dAuxLogged = false;
+ 	const bool st18dAuxFirst = !st18dAuxLogged;
+ 	if (st18dAuxFirst) {
+@@ -2659,12 +2730,14 @@
+ 	}
+ 	getMember<void *>(that, 0x78) = ccont;
+ 	FunctionCast(hwSetPowerWellStateAux, callback->ohwSetPowerWellStateAux)(that,param_1,param_2);
++	st18gSetPhase(231, "AUX_RETURN");
+ 	if (st18dAuxFirst)
+ 		SYSLOG("ngreen", "ST18D:AUX RETURN");
+ }
+ 
+ void Gen11::hwSetPowerWellStateDDI(AppleIntel::AppleIntelBaseController *that, bool param_1, uint param_2)
+ {
++	st18gSetPhase(240, "DDI_ENTER");
+ 	static bool st18dDdiLogged = false;
+ 	const bool st18dDdiFirst = !st18dDdiLogged;
+ 	if (st18dDdiFirst) {
+@@ -2673,6 +2746,7 @@
+ 	}
+ 	getMember<void *>(that, 0x78) = ccont;
+ 	FunctionCast(hwSetPowerWellStateDDI, callback->ohwSetPowerWellStateDDI)(that,param_1,param_2);
++	st18gSetPhase(241, "DDI_RETURN");
+ 	if (st18dDdiFirst)
+ 		SYSLOG("ngreen", "ST18D:DDI RETURN");
+ }
+@@ -3606,11 +3680,13 @@
+ 
+ void Gen11::AppleIntelPowerWellinit(AppleIntel::AppleIntelPowerWell *that, AppleIntel::AppleIntelBaseController *param_1)
+ {
++	st18gSetPhase(210, "PW_INIT_ENTER");
+ 	SYSLOG("ngreen", "ST18D:PW00 init ENTER controller=%p powerwell=%p", param_1, that);
+ 	ccont = param_1->fRegCachePool;
+ 	SYSLOG("ngreen", "ST18D:PW01 ccont captured=%p", ccont);
+ 
+ 	FunctionCast(AppleIntelPowerWellinit, callback->oAppleIntelPowerWellinit)(that, param_1);
++	st18gSetPhase(211, "PW_INIT_RETURN");
+ 	SYSLOG("ngreen", "ST18D:PW02 original init RETURN");
+ 
+ 	// After callthrough the south display domain is clocked; direct BAR read is safe.
