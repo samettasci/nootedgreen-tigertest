@@ -1,11 +1,11 @@
-name: Build NootedGreen REAL TGL Stage18F probePort plus PowerWell combined
+name: Build NootedGreen REAL TGL Stage18G FBStart deadman diagnostic
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build x86_64 DEBUG kexts - Stage18F COMBINED
+    name: Build x86_64 DEBUG kexts - Stage18G DEADMAN
     runs-on: macos-15-intel
 
     steps:
@@ -1277,6 +1277,152 @@ jobs:
           test "$(grep -c 'ST18F:PMODE-PROD-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
           test "$(grep -c 'ST18F:PMODE-DEBUG-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
 
+      - name: Stage18G - add pass-through FBController start deadman
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Preserve the exact Stage18F experiment. The only new route is a
+          # pass-through controller start wrapper with a 30 second deadman.
+          test "$(grep -c 'const bool st18cEnableFBRoutes = false' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'if (st18cEnableFBRoutes)' NootedGreen/kern_gen11.cpp)" -eq 3
+          test "$(grep -c 'ST18F:PMODE-PROD-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18F:PMODE-DEBUG-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18G:' NootedGreen/kern_gen11.cpp || true)" -eq 0
+
+          python3 - <<'PY18G'
+          import base64
+          import subprocess
+
+          patch = base64.b64decode("""
+          LS0tIE5vb3RlZEdyZWVuL2tlcm5fZ2VuMTEuY3BwCisrKyBOb290ZWRHcmVlbi9rZXJuX2dlbjEx
+          LmNwcApAQCAtNTksNiArNTksNTIgQEAKIAogR2VuMTEgKkdlbjExOjpjYWxsYmFjayA9IG51bGxw
+          dHI7CiAKKworLy8gU3RhZ2UxOEc6IGRpYWdub3N0aWMtb25seSBmcmFtZWJ1ZmZlciBzdGFydCBk
+          ZWFkbWFuLgorLy8KKy8vIFRoaXMgd3JhcHBlciBpcyBkZWxpYmVyYXRlbHkgcGFzcy10aHJvdWdo
+          OiBpdCBkb2VzIG5vdCB0b3VjaCBNTUlPLCBjaGFuZ2UgYQorLy8gcmV0dXJuIHZhbHVlLCBvciBl
+          bmFibGUgYW55IG9mIHRoZSBTdGFnZTE4QyBicm9hZCBmcmFtZWJ1ZmZlciByb3V0ZXMuIEl0IG9u
+          bHkKKy8vIHJlY29yZHMgdGhlIGxhdGVzdCBTdGFnZTE4RCBQb3dlcldlbGwgcGhhc2UgYW5kIGRl
+          bGliZXJhdGVseSBwYW5pY3MgaWYKKy8vIEFwcGxlSW50ZWx7QmFzZSxGcmFtZWJ1ZmZlcn1Db250
+          cm9sbGVyOjpzdGFydCgpIGRvZXMgbm90IHJldHVybiBpbiAzMCBzZWNvbmRzLgorc3RhdGljIG1h
+          Y2hfdm1fYWRkcmVzc190IHN0MThnT3JpZ2luYWxGQlN0YXJ0ID0gMDsKK3N0YXRpYyB2b2xhdGls
+          ZSBib29sIHN0MThnRkJTdGFydEFjdGl2ZSA9IGZhbHNlOworc3RhdGljIHZvbGF0aWxlIHVpbnQz
+          Ml90IHN0MThnUGhhc2UgPSAwOworc3RhdGljIGNvbnN0IGNoYXIgKiB2b2xhdGlsZSBzdDE4Z1Bo
+          YXNlTmFtZSA9ICJOT1RfU1RBUlRFRCI7CisKK3N0YXRpYyB2b2lkIHN0MThnU2V0UGhhc2UodWlu
+          dDMyX3QgcGhhc2UsIGNvbnN0IGNoYXIgKm5hbWUpIHsKKwlzdDE4Z1BoYXNlID0gcGhhc2U7CisJ
+          c3QxOGdQaGFzZU5hbWUgPSBuYW1lOworfQorCitzdGF0aWMgdm9pZCBzdDE4Z0ZCU3RhcnREZWFk
+          bWFuKHRocmVhZF9jYWxsX3BhcmFtX3QsIHRocmVhZF9jYWxsX3BhcmFtX3QpIHsKKwlpZiAoc3Qx
+          OGdGQlN0YXJ0QWN0aXZlKSB7CisJCXBhbmljKCJTVDE4RyBERUFETUFOOiBGQkNvbnRyb2xsZXI6
+          OnN0YXJ0IGRpZCBub3QgcmV0dXJuIHdpdGhpbiAzMHM7ICIKKwkJICAgICAgImxhc3QgcGhhc2U9
+          JXUgKCVzKS4gVGhpcyBwYW5pYyBpcyBkZWxpYmVyYXRlIGRpYWdub3N0aWMgZXZpZGVuY2UuIiwK
+          KwkJICAgICAgc3QxOGdQaGFzZSwgc3QxOGdQaGFzZU5hbWUgPyBzdDE4Z1BoYXNlTmFtZSA6ICI8
+          bnVsbD4iKTsKKwl9CisJU1lTTE9HKCJuZ3JlZW4iLCAiU1QxOEc6REVBRE1BTi1ESVNBUk1FRCBz
+          dGFydCByZXR1cm5lZCBiZWZvcmUgdGltZW91dCIpOworfQorCitzdGF0aWMgYm9vbCBzdDE4Z0ZC
+          U3RhcnRQcm9iZSh2b2lkICp0aGF0LCBJT1NlcnZpY2UgKnByb3ZpZGVyKSB7CisJc3QxOGdGQlN0
+          YXJ0QWN0aXZlID0gdHJ1ZTsKKwlzdDE4Z1NldFBoYXNlKDEwMCwgIkZCX1NUQVJUX0VOVEVSIik7
+          CisKKwlhdXRvIGRlYWRtYW4gPSB0aHJlYWRfY2FsbF9hbGxvY2F0ZShzdDE4Z0ZCU3RhcnREZWFk
+          bWFuLCBudWxscHRyKTsKKwlpZiAoIWRlYWRtYW4pCisJCXBhbmljKCJTVDE4RyBERUFETUFOOiB0
+          aHJlYWRfY2FsbF9hbGxvY2F0ZSBmYWlsZWQiKTsKKworCXVpbnQ2NF90IGRlYWRsaW5lID0gMDsK
+          KwljbG9ja19pbnRlcnZhbF90b19kZWFkbGluZSgzMCwga1NlY29uZFNjYWxlLCAmZGVhZGxpbmUp
+          OworCXRocmVhZF9jYWxsX2VudGVyX2RlbGF5ZWQoZGVhZG1hbiwgZGVhZGxpbmUpOworCVNZU0xP
+          RygibmdyZWVuIiwgIlNUMThHOkRFQURNQU4tQVJNRUQgdGltZW91dD0zMHMiKTsKKworCWNvbnN0
+          IGJvb2wgcmVzdWx0ID0gRnVuY3Rpb25DYXN0KHN0MThnRkJTdGFydFByb2JlLCBzdDE4Z09yaWdp
+          bmFsRkJTdGFydCkodGhhdCwgcHJvdmlkZXIpOworCXN0MThnU2V0UGhhc2UoMTk5LCAiRkJfU1RB
+          UlRfUkVUVVJOIik7CisJc3QxOGdGQlN0YXJ0QWN0aXZlID0gZmFsc2U7CisJU1lTTE9HKCJuZ3Jl
+          ZW4iLCAiU1QxOEc6RkJTVEFSVC1SRVRVUk4gcmVzdWx0PSVkIiwgcmVzdWx0KTsKKwlyZXR1cm4g
+          cmVzdWx0OworfQorCiB2b2lkIEdlbjExOjppbml0KCkgewogCWNhbGxiYWNrID0gdGhpczsKIApA
+          QCAtNjUyLDYgKzY5OCwyNyBAQAogCQkJCiAJCX0KIAkJCisKKwkJLy8gU3RhZ2UxOEc6IHJvdXRl
+          IG9ubHkgY29udHJvbGxlciBzdGFydCB0byBhIGRpYWdub3N0aWMgcGFzcy10aHJvdWdoLgorCQkv
+          LyBTdGFnZTE4QyBicm9hZCBmcmFtZWJ1ZmZlciByb3V0ZSBncm91cHMgcmVtYWluIGRpc2FibGVk
+          LgorCQlpZiAoaXNwcm9kKSB7CisJCQlSb3V0ZVJlcXVlc3RQbHVzIHN0MThnRkJTdGFydFByb2RS
+          ZXF1ZXN0W10gPSB7CisJCQkJeyJfX1pOMzFBcHBsZUludGVsRnJhbWVidWZmZXJDb250cm9sbGVy
+          NXN0YXJ0RVA5SU9TZXJ2aWNlIiwgc3QxOGdGQlN0YXJ0UHJvYmUsIHN0MThnT3JpZ2luYWxGQlN0
+          YXJ0fSwKKwkJCX07CisJCQlTWVNMT0coIm5ncmVlbiIsICJTVDE4RzpGQlNUQVJULVJPVVRFLVBS
+          T0QtQkVGT1JFIik7CisJCQlQQU5JQ19DT05EKCFSb3V0ZVJlcXVlc3RQbHVzOjpyb3V0ZUFsbChw
+          YXRjaGVyLCBpbmRleCwgc3QxOGdGQlN0YXJ0UHJvZFJlcXVlc3QsIGFkZHJlc3MsIHNpemUpLAor
+          CQkJCSJuZ3JlZW4iLCAiU3RhZ2UxOEcgZmFpbGVkIHRvIHJvdXRlIHByb2R1Y3Rpb24gRkJDb250
+          cm9sbGVyOjpzdGFydCIpOworCQkJU1lTTE9HKCJuZ3JlZW4iLCAiU1QxOEc6RkJTVEFSVC1ST1VU
+          RS1QUk9ELUFGVEVSIik7CisJCX0gZWxzZSB7CisJCQlSb3V0ZVJlcXVlc3RQbHVzIHN0MThnRkJT
+          dGFydERlYnVnUmVxdWVzdFtdID0geworCQkJCXsiX19aTjI0QXBwbGVJbnRlbEJhc2VDb250cm9s
+          bGVyNXN0YXJ0RVA5SU9TZXJ2aWNlIiwgc3QxOGdGQlN0YXJ0UHJvYmUsIHN0MThnT3JpZ2luYWxG
+          QlN0YXJ0fSwKKwkJCX07CisJCQlTWVNMT0coIm5ncmVlbiIsICJTVDE4RzpGQlNUQVJULVJPVVRF
+          LURFQlVHLUJFRk9SRSIpOworCQkJUEFOSUNfQ09ORCghUm91dGVSZXF1ZXN0UGx1czo6cm91dGVB
+          bGwocGF0Y2hlciwgaW5kZXgsIHN0MThnRkJTdGFydERlYnVnUmVxdWVzdCwgYWRkcmVzcywgc2l6
+          ZSksCisJCQkJIm5ncmVlbiIsICJTdGFnZTE4RyBmYWlsZWQgdG8gcm91dGUgZGVidWcgRkJDb250
+          cm9sbGVyOjpzdGFydCIpOworCQkJU1lTTE9HKCJuZ3JlZW4iLCAiU1QxOEc6RkJTVEFSVC1ST1VU
+          RS1ERUJVRy1BRlRFUiIpOworCQl9CisKIAkJLy8gU3RhZ2UxOEY6IGNvbWJpbmUgU3RhZ2UxOEQn
+          cyBtaW5pbWFsIGNjb250L1Bvd2VyV2VsbCByb3V0ZXMKIAkJLy8gd2l0aCBTdGFnZTE4RSdzIGV4
+          YWN0IHByb2JlUG9ydE1vZGUgVHlwZTIgY2FsbC1zaXRlIGJ5cGFzcy4KIAkJLy8gVGhlIFN0YWdl
+          MThDIGJyb2FkIGZyYW1lYnVmZmVyIHJvdXRlIGd1YXJkcyByZW1haW4gZmFsc2UuCkBAIC0yNjIx
+          LDYgKzI2ODgsNyBAQAogLy8g4oaSIHZzeW5jIGludGVycnVwdHMgbmV2ZXIgZGVsaXZlcmVkIOKG
+          kiBHUFUgcmluZyBpZGxlIOKGkiBmcmFtZWJ1ZmZlciBzdGF5ZWQgYmxhY2suCiB2b2lkIEdlbjEx
+          Ojpod1NldFBvd2VyV2VsbFN0YXRlUEdFKEFwcGxlSW50ZWw6OkFwcGxlSW50ZWxCYXNlQ29udHJv
+          bGxlciAqdGhhdCwgYm9vbCBwYXJhbV8xLCB1aW50IHBhcmFtXzIpCiB7CisJc3QxOGdTZXRQaGFz
+          ZSgyMjAsICJQR0VfRU5URVIiKTsKIAlpZiAoIU5HcmVlbjo6Y2FsbGJhY2stPmlzUmVhbFRHTCkg
+          ewogCQl1aW50MzJfdCBjdGwxID0gTkdyZWVuOjpjYWxsYmFjay0+cmVhZFJlZzMyKDB4NDU0MDAp
+          OwogCQl1aW50MzJfdCBuZXdWYWw7CkBAIC0yNjM0LDYgKzI3MDIsNyBAQAogCQlTWVNMT0coIm5n
+          cmVlbiIsICJWMTgzLlBHRTogZW49JXUgbWFzaz0weCV4IGN0bDE6IDB4JXgtPjB4JXgiLAogCQkJ
+          ICAgKHVuc2lnbmVkKXBhcmFtXzEsIHBhcmFtXzIsIGN0bDEsIG5ld1ZhbCk7CiAJCU5HcmVlbjo6
+          Y2FsbGJhY2stPndyaXRlUmVnMzIoMHg0NTQwMCwgbmV3VmFsKTsKKwkJc3QxOGdTZXRQaGFzZSgy
+          MjEsICJQR0VfUkVUVVJOIik7CiAJCXJldHVybjsKIAl9CiAJLy8gUmVhbCBUR0w6IHVzZSBvcmln
+          aW5hbCB3aXRoIGNjb250IGZpeHVwLgpAQCAtMjY0NSwxMiArMjcxNCwxNCBAQAogCX0KIAlnZXRN
+          ZW1iZXI8dm9pZCAqPih0aGF0LCAweDc4KSA9IGNjb250OwogCUZ1bmN0aW9uQ2FzdChod1NldFBv
+          d2VyV2VsbFN0YXRlUEdFLCBjYWxsYmFjay0+b2h3U2V0UG93ZXJXZWxsU3RhdGVQR0UpKHRoYXQs
+          IHBhcmFtXzEsIHBhcmFtXzIpOworCXN0MThnU2V0UGhhc2UoMjIxLCAiUEdFX1JFVFVSTiIpOwog
+          CWlmIChzdDE4ZFBnZUZpcnN0KQogCQlTWVNMT0coIm5ncmVlbiIsICJTVDE4RDpQR0UgUkVUVVJO
+          Iik7CiB9CiAKIHZvaWQgR2VuMTE6Omh3U2V0UG93ZXJXZWxsU3RhdGVBdXgoQXBwbGVJbnRlbDo6
+          QXBwbGVJbnRlbEJhc2VDb250cm9sbGVyICp0aGF0LCBib29sIHBhcmFtXzEsIHVpbnQgcGFyYW1f
+          MikKIHsKKwlzdDE4Z1NldFBoYXNlKDIzMCwgIkFVWF9FTlRFUiIpOwogCXN0YXRpYyBib29sIHN0
+          MThkQXV4TG9nZ2VkID0gZmFsc2U7CiAJY29uc3QgYm9vbCBzdDE4ZEF1eEZpcnN0ID0gIXN0MThk
+          QXV4TG9nZ2VkOwogCWlmIChzdDE4ZEF1eEZpcnN0KSB7CkBAIC0yNjU5LDEyICsyNzMwLDE0IEBA
+          CiAJfQogCWdldE1lbWJlcjx2b2lkICo+KHRoYXQsIDB4NzgpID0gY2NvbnQ7CiAJRnVuY3Rpb25D
+          YXN0KGh3U2V0UG93ZXJXZWxsU3RhdGVBdXgsIGNhbGxiYWNrLT5vaHdTZXRQb3dlcldlbGxTdGF0
+          ZUF1eCkodGhhdCxwYXJhbV8xLHBhcmFtXzIpOworCXN0MThnU2V0UGhhc2UoMjMxLCAiQVVYX1JF
+          VFVSTiIpOwogCWlmIChzdDE4ZEF1eEZpcnN0KQogCQlTWVNMT0coIm5ncmVlbiIsICJTVDE4RDpB
+          VVggUkVUVVJOIik7CiB9CiAKIHZvaWQgR2VuMTE6Omh3U2V0UG93ZXJXZWxsU3RhdGVEREkoQXBw
+          bGVJbnRlbDo6QXBwbGVJbnRlbEJhc2VDb250cm9sbGVyICp0aGF0LCBib29sIHBhcmFtXzEsIHVp
+          bnQgcGFyYW1fMikKIHsKKwlzdDE4Z1NldFBoYXNlKDI0MCwgIkRESV9FTlRFUiIpOwogCXN0YXRp
+          YyBib29sIHN0MThkRGRpTG9nZ2VkID0gZmFsc2U7CiAJY29uc3QgYm9vbCBzdDE4ZERkaUZpcnN0
+          ID0gIXN0MThkRGRpTG9nZ2VkOwogCWlmIChzdDE4ZERkaUZpcnN0KSB7CkBAIC0yNjczLDYgKzI3
+          NDYsNyBAQAogCX0KIAlnZXRNZW1iZXI8dm9pZCAqPih0aGF0LCAweDc4KSA9IGNjb250OwogCUZ1
+          bmN0aW9uQ2FzdChod1NldFBvd2VyV2VsbFN0YXRlRERJLCBjYWxsYmFjay0+b2h3U2V0UG93ZXJX
+          ZWxsU3RhdGVEREkpKHRoYXQscGFyYW1fMSxwYXJhbV8yKTsKKwlzdDE4Z1NldFBoYXNlKDI0MSwg
+          IkRESV9SRVRVUk4iKTsKIAlpZiAoc3QxOGREZGlGaXJzdCkKIAkJU1lTTE9HKCJuZ3JlZW4iLCAi
+          U1QxOEQ6RERJIFJFVFVSTiIpOwogfQpAQCAtMzYwNiwxMSArMzY4MCwxMyBAQAogCiB2b2lkIEdl
+          bjExOjpBcHBsZUludGVsUG93ZXJXZWxsaW5pdChBcHBsZUludGVsOjpBcHBsZUludGVsUG93ZXJX
+          ZWxsICp0aGF0LCBBcHBsZUludGVsOjpBcHBsZUludGVsQmFzZUNvbnRyb2xsZXIgKnBhcmFtXzEp
+          CiB7CisJc3QxOGdTZXRQaGFzZSgyMTAsICJQV19JTklUX0VOVEVSIik7CiAJU1lTTE9HKCJuZ3Jl
+          ZW4iLCAiU1QxOEQ6UFcwMCBpbml0IEVOVEVSIGNvbnRyb2xsZXI9JXAgcG93ZXJ3ZWxsPSVwIiwg
+          cGFyYW1fMSwgdGhhdCk7CiAJY2NvbnQgPSBwYXJhbV8xLT5mUmVnQ2FjaGVQb29sOwogCVNZU0xP
+          RygibmdyZWVuIiwgIlNUMThEOlBXMDEgY2NvbnQgY2FwdHVyZWQ9JXAiLCBjY29udCk7CiAKIAlG
+          dW5jdGlvbkNhc3QoQXBwbGVJbnRlbFBvd2VyV2VsbGluaXQsIGNhbGxiYWNrLT5vQXBwbGVJbnRl
+          bFBvd2VyV2VsbGluaXQpKHRoYXQsIHBhcmFtXzEpOworCXN0MThnU2V0UGhhc2UoMjExLCAiUFdf
+          SU5JVF9SRVRVUk4iKTsKIAlTWVNMT0coIm5ncmVlbiIsICJTVDE4RDpQVzAyIG9yaWdpbmFsIGlu
+          aXQgUkVUVVJOIik7CiAKIAkvLyBBZnRlciBjYWxsdGhyb3VnaCB0aGUgc291dGggZGlzcGxheSBk
+          b21haW4gaXMgY2xvY2tlZDsgZGlyZWN0IEJBUiByZWFkIGlzIHNhZmUuCg==
+          """)
+          result = subprocess.run(
+              ["patch", "-p0", "--forward", "--batch"],
+              input=patch,
+              check=False,
+          )
+          if result.returncode != 0:
+              raise SystemExit(f"Stage18G patch failed with status {result.returncode}")
+          PY18G
+
+          echo "=== Stage18G diagnostic source markers ==="
+          grep -n 'ST18G:\|ST18G DEADMAN\|st18gSetPhase' NootedGreen/kern_gen11.cpp
+
+          test "$(grep -c 'const bool st18cEnableFBRoutes = false' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'if (st18cEnableFBRoutes)' NootedGreen/kern_gen11.cpp)" -eq 3
+          test "$(grep -c 'ST18G:DEADMAN-ARMED' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18G DEADMAN: FBController::start did not return within 30s' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18G:FBSTART-ROUTE-PROD-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'ST18G:FBSTART-ROUTE-DEBUG-BEFORE' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'st18gSetPhase(210, \"PW_INIT_ENTER\")' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'st18gSetPhase(220, \"PGE_ENTER\")' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'st18gSetPhase(230, \"AUX_ENTER\")' NootedGreen/kern_gen11.cpp)" -eq 1
+          test "$(grep -c 'st18gSetPhase(240, \"DDI_ENTER\")' NootedGreen/kern_gen11.cpp)" -eq 1
+
       - name: Build NootedGreen DEBUG
         shell: bash
         run: |
@@ -1311,13 +1457,15 @@ jobs:
           ditto "$HC" out/Artifacts/HookCase.kext
 
           {
-            echo "STAGE18F REAL TGL PROBEPORTMODE PLUS POWERWELL COMBINED TEST"
+            echo "STAGE18G REAL TGL FBSTART DEADMAN DIAGNOSTIC"
             echo "Expected EFI device-id: 0x9A48"
             echo "Expected EFI framebuffer tier: -ngreentglwithgfx (KEEP NORMAL WITHGFX MODE)"
-            echo "Expected EFI Stage18F args: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx (NO -ngreenforcefb)"
+            echo "Expected EFI Stage18G args: identical to Stage18F: -ngreennotcon -ngreennov500 -ngreennov221 -ngreennof2 -ngreennogfx (NO -ngreenforcefb)"
             echo "Required system state: AppleIntelTGLGraphicsFramebuffer IOPCIPrimaryMatch=0x9A488086; AppleIntelTGLGraphics IOPCIPrimaryMatch=0xFFFF8086 dummy nonmatch"
-            echo "Stage18F behavior: exact union of Stage18D minimal PowerWell routes and Stage18E probePortMode Type2 bypass; Stage18C broad FB route groups remain disabled"
-            echo "Stage18F rationale: Stage18D and Stage18E each hard-hung separately, so this tests whether both missing runtime requirements must be present together"
+            echo "Stage18F behavior retained: exact union of Stage18D minimal PowerWell routes and Stage18E probePortMode Type2 bypass"
+            echo "Stage18G change: one pass-through FBController::start route, a 30-second deadman, and in-memory PowerWell phase markers; no new MMIO write or return-value override"
+            echo "Stage18G expected diagnostic panic: ST18G DEADMAN ... last phase=<code> (<name>)"
+            echo "Phase map: 100 FB_START_ENTER; 210/211 PW_INIT ENTER/RETURN; 220/221 PGE; 230/231 AUX; 240/241 DDI; 199 FB_START_RETURN"
             echo "Stage18D route markers: ST18D:PW-ROUTE-COMMON-{BEFORE|AFTER} plus exactly one init variant {PROD|DEBUG}-{BEFORE|AFTER}"
             echo "Stage18B debug-lookup-skip markers retained: ST18:FB-DBG-SKIP and ST18:FB-DBG-POST"
             echo "Stage16 markers retained: ST16:NOGFX-ARMED and ST16:HW-REG-SKIP"
@@ -1343,7 +1491,7 @@ jobs:
 
           # Write strings once before grep so pipefail cannot turn an early grep
           # match into a broken-pipe failure from Xcode's strings utility.
-          NG_STRINGS="$RUNNER_TEMP/Stage18F-NootedGreen.strings.txt"
+          NG_STRINGS="$RUNNER_TEMP/Stage18G-NootedGreen.strings.txt"
           strings out/Artifacts/NootedGreen.kext/Contents/MacOS/NootedGreen > "$NG_STRINGS"
           grep -Fq 'ST18D:PW00' "$NG_STRINGS"
           grep -Fq 'ST18D:PGE ENTER' "$NG_STRINGS"
@@ -1351,6 +1499,15 @@ jobs:
           grep -Fq 'ST18D:DDI ENTER' "$NG_STRINGS"
           grep -Fq 'ST18F:PMODE-PROD-BEFORE' "$NG_STRINGS"
           grep -Fq 'ST18F:PMODE-DEBUG-BEFORE' "$NG_STRINGS"
+          grep -Fq 'ST18G:DEADMAN-ARMED timeout=30s' "$NG_STRINGS"
+          grep -Fq 'ST18G DEADMAN: FBController::start did not return within 30s' "$NG_STRINGS"
+          grep -Fq 'ST18G:FBSTART-ROUTE-PROD-BEFORE' "$NG_STRINGS"
+          grep -Fq 'ST18G:FBSTART-ROUTE-DEBUG-BEFORE' "$NG_STRINGS"
+          grep -Fq 'FB_START_ENTER' "$NG_STRINGS"
+          grep -Fq 'PW_INIT_ENTER' "$NG_STRINGS"
+          grep -Fq 'PGE_ENTER' "$NG_STRINGS"
+          grep -Fq 'AUX_ENTER' "$NG_STRINGS"
+          grep -Fq 'DDI_ENTER' "$NG_STRINGS"
 
           python3 - "$NG" <<'PY18FVERIFY'
           import sys
@@ -1381,10 +1538,10 @@ jobs:
             shasum -a 256               NootedGreen.kext/Contents/MacOS/NootedGreen               HookCase.kext/Contents/MacOS/HookCase               > SHA256.txt
           )
 
-      - name: Upload Stage18F kexts
+      - name: Upload Stage18G kexts
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-REAL-TGL-STAGE18F-PROBEPORT-POWERWELL-COMBINED
+          name: NootedGreen-REAL-TGL-STAGE18G-FBSTART-DEADMAN
           path: out/Artifacts
           if-no-files-found: error
           retention-days: 14
