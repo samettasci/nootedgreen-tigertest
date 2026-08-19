@@ -1,0 +1,40 @@
+Stage18G FBStart Deadman Diagnostic
+==================================
+
+Base
+----
+- Exact Stage18F source transformation remains in place.
+- Stage18D minimal PowerWell routes remain enabled.
+- Stage18E probePortMode Type2 call-site bypass remains enabled.
+- st18cEnableFBRoutes remains false; all three broad groups remain guarded.
+- Real TGL SKU bypass remains disabled.
+- Expected framebuffer/HW state remains 0x9A488086 / 0xFFFF8086.
+- Expected boot arguments remain identical to Stage18F; no -ngreenforcefb.
+
+Only new behavior
+-----------------
+- Route exactly one controller start symbol selected by isprod:
+  __ZN31AppleIntelFramebufferController5startEP9IOService
+  or
+  __ZN24AppleIntelBaseController5startEP9IOService
+- The wrapper is pass-through and preserves the original bool return value.
+- A thread_call deadman is armed for 30 seconds immediately before callthrough.
+- If start returns, st18gFBStartActive is cleared and the later callback is inert.
+- If start does not return while kernel scheduling remains alive, the callback
+  deliberately panics with the most recently observed phase code and name.
+- Phase updates are in-memory volatile stores only; they do not add per-call
+  logging or MMIO traffic.
+
+Interpretation
+--------------
+- Deliberate ST18G DEADMAN panic: start entered and did not return in 30 seconds;
+  the phase identifies the last observed routed PowerWell boundary.
+- FB_START_RETURN/disarmed: controller start returned; the hard hang is later.
+- No deliberate panic after the timeout: the timer thread could not run, so the
+  lock likely stops interrupts/scheduling or occurs before the start wrapper.
+
+Safety
+------
+- USB EFI only.
+- Do not change the internal safe EFI, /Library/Extensions, NVRAM, or SMBIOS.
+- OpenCore ApplePanic=true, keepsyms=1, debug=0x100, and watchdog=0 are retained.
